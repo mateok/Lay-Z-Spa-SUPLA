@@ -11,6 +11,7 @@
 {% block header_after_default %}
 <!-- <select> caché pour i18n.js -->
 <select id="lang-select" style="display:none;">
+    <option value="pl-PL">Polski</option>
     <option value="en-EN">English</option>
     <option value="fr-FR">Français</option>
     <option value="es-ES">Español</option>
@@ -24,6 +25,7 @@
 <!-- bloc drapeaux au-dessus des options -->
 <section id="language-section">
     <div id="lang-flags">
+        <span class="flag" data-lang="pl-PL" title="Polski">🇵🇱</span>
         <span class="flag" data-lang="en-EN" title="English">🇬🇧</span>
         <span class="flag" data-lang="fr-FR" title="Français">🇫🇷</span>
         <span class="flag" data-lang="es-ES" title="Español">🇪🇸</span>
@@ -165,14 +167,8 @@
 
         const selectLang = document.getElementById('lang-select')
         function switchLang(langCode) {
-            if (langCode === 'en-EN') {
-                localStorage.setItem('langueSPA', langCode)
-                location.reload()
-            } else {
-                localStorage.setItem('langueSPA', langCode)
-                selectLang.value = langCode
-                selectLang.dispatchEvent(new Event('change'))
-            }
+            localStorage.setItem('langueSPA', langCode)
+            location.reload()
         }
         document.querySelectorAll('#lang-flags .flag').forEach(span => {
             span.addEventListener('click', () => {

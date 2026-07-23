@@ -106,9 +106,10 @@
     .topnavicon {
       width: clamp(26px, 7vw, 32px);
       height: clamp(26px, 7vw, 32px);
+      position: relative;
+      flex: 0 0 auto;
       text-decoration: none;
       color: #fff;
-      font-size: clamp(1.8em, 5vw, 2.2em);
       display: flex;
       justify-content: center;
       align-items: center;
@@ -124,11 +125,20 @@
     }
 
     .topnavicon::before {
-      content: "\00D7";
-      line-height: 0.8;
+      content: "";
       position: absolute;
+      top: 50%;
+      left: 50%;
+      width: 62%;
+      height: 62%;
+      background:
+        linear-gradient(45deg,
+          transparent 45%, currentColor 45%, currentColor 55%, transparent 55%),
+        linear-gradient(-45deg,
+          transparent 45%, currentColor 45%, currentColor 55%, transparent 55%);
+      transform: translate(-50%, -50%);
       opacity: 0;
-      transition: 0.2s;
+      transition: opacity 0.2s ease;
     }
 
     .show-before.topnavicon::before {
@@ -136,12 +146,18 @@
     }
 
     .topnavicon::after {
-      content: "\2630";
-      line-height: 0.8;
+      content: "";
       position: absolute;
-      transition: 0.2s;
+      top: 50%;
+      left: 50%;
+      width: 62%;
+      height: 2px;
+      border-radius: 1px;
+      background-color: currentColor;
+      box-shadow: 0 -6px 0 currentColor, 0 6px 0 currentColor;
+      transform: translate(-50%, -50%);
+      transition: opacity 0.2s ease;
       opacity: 1;
-      display: inline-block;
     }
 
     .show-before.topnavicon::after {
@@ -149,7 +165,10 @@
     }
 
     .topnav {
-      overflow: hidden;
+      overflow-x: hidden;
+      overflow-y: auto;
+      overscroll-behavior: contain;
+      -webkit-overflow-scrolling: touch;
       background-color: #ccc;
       width: 100%;
       left: 0;
@@ -157,6 +176,7 @@
       top: -100vh;
       z-index: 10;
       height: calc(100vh - var(--header-height));
+      height: calc(100dvh - var(--header-height));
       display: flex;
       flex-direction: column;
       justify-content: flex-start;
@@ -164,6 +184,7 @@
       gap: 0.5em;
       padding: var(--container-padding);
       padding-top: 1em;
+      padding-bottom: max(1em, env(safe-area-inset-bottom));
     }
 
     .darkmode .topnav {
@@ -305,6 +326,14 @@
       background-color: #0076d1;
       box-shadow: 0 4px 12px rgba(0,0,0,0.15);
       transform: translateY(-1px);
+    }
+
+    /* Flagi są przyciskami wyboru języka, a nie tekstem do zaznaczania. */
+    #lang-flags .flag {
+      display: inline-block;
+      cursor: pointer;
+      user-select: none;
+      -webkit-user-select: none;
     }
 
     /* Contrôles range améliorés */

@@ -13,9 +13,9 @@
 #define HA_PREFIX_F F("homeassistant")
 #define PROM_NAMESPACE "layzspa"
 // #define PROM_NAMESPACE_F F("layzspa")
-#define OTA_PSWD_F F("esp8266")
 #define WM_AP_NAME_F String(F("Lay-Z-Spa-"))+String(ESP.getChipId())
-#define WM_AP_PASSWORD_F F("layzspam0dule")
+#define WM_AP_PASSWORD "layzspam0dule"
+#define WM_AP_PASSWORD_F F(WM_AP_PASSWORD)
 // MQTT defaults
 #define MQTT_HOST_F F("192.168.0.20")
 #define MQTT_USER_F F("username")
@@ -85,13 +85,13 @@ bool useControlSelector = false;
  * Means not the data we write with the "WiFi Access Point" configuration below.
  *  (wifi.json on flash memory)
  *
- * NOTICE: If you want your ESP running continuously without creating an access point
- *  when having WiFi issues, set 'enableWmApFallback=false', otherwise we could fallback
- *  to this 'AP mode' on the upstart setup() job. This setting can be changed from web ui.
+ * The recovery AP is bounded to the provisioning window after restart. Once
+ * that window closes, a normal Wi-Fi disconnect only retries station mode and
+ * never exposes an AP. This setting can be changed from the web UI.
  *
- * WARNING: For the case you set 'enableWmApFallback=false' you could lock out
- *  yourself when loosing your home network. You would have to "Reset WiFi" but
- *  you are not able to connect to the web ui without a connection.
+ * WARNING: Setting enableWmApFallback=false disables the post-claim recovery
+ * AP. A full flash/EEPROM reset may then be required after losing home-network
+ * access.
  */
 /** get the state of the WiFi configuration manager fallback on wifi failures */
 // bool enableWmApFallback = true;
@@ -153,5 +153,26 @@ struct sMQTT_info
 };
 
 sMQTT_info* mqtt_info;
+
+/*
+ * SUPLA Cloud
+ *
+ * SUPLA uses its native, outbound TLS connection. The user only provides the
+ * e-mail address assigned to the SUPLA account; the device identity is
+ * generated locally and persisted in EEPROM.
+ */
+struct sSupla_info
+{
+    String server;
+    String email;
+    String setupPassword;
+    bool enabled = false;
+    bool configured = false;
+    bool setupPasswordConfigured = false;
+    uint8_t guid[16] = {};
+    uint8_t authKey[16] = {};
+};
+
+sSupla_info* supla_info;
 
 #endif

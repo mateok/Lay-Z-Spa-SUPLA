@@ -15,11 +15,9 @@ menu_spaconfig=SPA-Konfiguration
 menu_webconfig=Web-Konfiguration
 menu_networkconfig=Netzwerk-Konfiguration
 menu_mqttconfig=MQTT-Konfiguration
-menu_directory=Verzeichnis
-menu_upload=Datei-Upload
-menu_remove=Dateien löschen
-menu_chkupdatefw=Firmware-Update prüfen
+menu_update=Aktualisierung
 menu_restart=ESP neu starten
+menu_factory_reset=Werkseinstellungen
 
 button_save=Speichern
 label_langue=Sprache :
@@ -73,13 +71,10 @@ label_avg_ambient=Durchschnittliche Umgebungstemperatur :
 label_time_minutes=Zeit (Minuten) :
 
 footer_mqtt_loading=MQTT : Status wird geladen…
+footer_supla_loading=SUPLA: Status wird geladen…
 footer_fw_loading=Firmware : Status wird geladen…
 footer_model_loading=Modell : Status wird geladen…
 footer_rssi_loading=RSSI : Status wird geladen…
-
-titel_chkupdatefw=Lay-Z-Spa Modul | Firmware-Update prüfen
-titel_chkupdatefw_header=Firmware-Update prüfen
-chkupdate_message=Diese Funktion wurde entfernt. Sie war zu anspruchsvoll für den ESP8266 und ich konnte GitHub nicht dazu bringen, kleine genug Pakete zu senden, damit er sie verwalten kann. Schade, denn es funktionierte früher, aber ich denke, etwas hat sich auf GitHub-Seite geändert.
 
 tooltip_virtual=Der ESP versucht die Wassertemperatur auch dann zu verfolgen, wenn die Pumpe gestoppt ist und die Temperatur in der Pumpe sinkt, während das große Wasservolumen langsamer abkühlt. Verwendet die Umgebungstemperatur. Muss vor Gebrauch kalibriert werden. Siehe SPA-Konfigurations-Seite.
 tooltip_brightness=Erinnerung: Wenn auf "0" eingestellt, sind die Anzeige und alle Pumpentasten komplett ausgeschaltet, leuchten aber 5 s auf, wenn eine Taste gedrückt wird.
@@ -229,29 +224,6 @@ label_client_id=Client-ID :
 label_base_topic=Basis-Topic :
 label_telemetry_interval=Telemetrie-Intervall (s) :
 
-titel_remove=Datei-Löschung
-header_remove=Datei-Löschung
-header_module=lay-z-spa modul
-menu_remove=Datei-Löschung
-remove_instruction=Verwenden Sie diese Seite, um eine auf dem ESP8266 erstellte Datei zu löschen.
-btn_remove=Löschen
-alert_enter_filename=Bitte geben Sie einen Dateinamen ein.
-alert_file_removed=Die Datei wurde gelöscht.
-
-titel_success=Lay-Z-Spa Modul | Erfolg!
-titel_success_header=Erfolg
-success_message=Der Vorgang war erfolgreich.
-success_btn_home=Startseite
-success_btn_upload=Datei hochladen
-success_btn_remove=Datei löschen
-
-titel_uploader=Lay-Z-Spa Modul | Datei-Upload
-titel_uploader_header=Datei-Upload
-upload_instr1=Verwenden Sie diese Seite, um neue Dateien auf den ESP8266 hochzuladen.
-upload_instr2=Sie können komprimierte (deflate) Dateien (Dateien mit .gz-Erweiterung) verwenden, um Speicherplatz und Bandbreite zu sparen.
-btn_browse=Durchsuchen...
-btn_upload=hochladen
-
 # ========================
 # Schlüssel für wifi.html 
 # ========================
@@ -272,8 +244,8 @@ label_password=Passwort :
 
 # Bereich "Soft Access Point"
 section_softap=Soft Access Point :
-label_enableWM=Soft Access Point aktivieren (Vorsicht : nur ankreuzen wenn nötig!) :
-tooltip_enableWM=Aktivieren Sie den Access Point des ESP, um sich verbinden zu können, wenn Ihr Netzwerk nicht verfügbar ist ; wenn Ihr Netzwerk nicht verfügbar ist, startet der ESP seinen eigenen Access Point.
+label_enableWM=Recovery-Setup-Access-Point nach dem Neustart aktivieren:
+tooltip_enableWM=Startet den Setup-AP nur während des zeitlich begrenzten Provisionierungsfensters nach einem Neustart. Nach einer beliebigen WLAN-Trennung wird kein AP geöffnet.
 
 # Bereich "Statische IP"
 section_static_ip=Statische IP :
@@ -313,3 +285,53 @@ tooltip_power_levels_info=Passt die Leistungsstufen für verschiedene Betriebsmo
 
 tooltip_calibrated_info=Wenn angekreuzt, ist die virtuelle Temperatur kalibriert. Neu kalibrieren durch Abwählen und Drücken der SPEICHERN-Taste.
 tooltip_calibrate_instr=Kalibrieren Sie, indem Sie den Widerstand AUS und die Pumpe AN halten, bis die Temperatur um einige Grad gefallen ist. Berühren Sie in der Zwischenzeit keine Jets, Blasen usw. Die Wassertemperatur muss zu Beginn um mehrere Grad von der Umgebungstemperatur abweichen.
+
+# SUPLA-Cloud-Konfiguration
+menu_suplaconfig=SUPLA-Konfiguration
+header_suplaconfig=SUPLA-Konfiguration
+section_supla_connection=Cloud-Verbindung
+supla_setup_note=Geben Sie die E-Mail-Adresse Ihres SUPLA-Cloud-Kontos ein. Auf diesem Gerät wird kein SUPLA-Kontopasswort gespeichert. Aktivieren Sie vor der ersten Verbindung die Geräteregistrierung in SUPLA Cloud. Das Standardpasswort des ESP-Setup-WLANs lautet layzspam0dule.
+supla_wifi_setup_note=Konfigurieren Sie zuerst die Verbindung des ESP mit Ihrem 2,4-GHz-Heim-WLAN.
+supla_wifi_setup_link=Netzwerk-Konfiguration öffnen
+label_enable_supla=SUPLA aktivieren:
+tooltip_enable_supla=Dieses Modul direkt mit SUPLA Cloud verbinden. Die lokale Weboberfläche und die MQTT-Integration bleiben verfügbar.
+label_supla_email=E-Mail des SUPLA-Kontos:
+tooltip_supla_email=Damit wird das SUPLA-Cloud-Konto festgelegt, dem das Gerät hinzugefügt wird. Das Modul führt damit keine Anmeldung durch.
+placeholder_supla_email=name@beispiel.de
+placeholder_supla_email_configured=Konfiguriert &ndash; neue Adresse nur eingeben, um das Konto zu wechseln
+label_supla_server=SUPLA-Server:
+tooltip_supla_server=Optional. Leer lassen, um die automatische Erkennung von SUPLA Cloud zu verwenden. Nur Hostnamen oder IP-Adresse ohne https:// und Pfad eingeben.
+placeholder_supla_server=Automatische Erkennung (empfohlen)
+section_supla_status=Status
+label_supla_configured=Kopplung konfiguriert:
+label_supla_wifi_configured=Heim-WLAN konfiguriert:
+label_supla_running=SUPLA-Client:
+label_supla_cloud_status=Cloud-Status:
+label_supla_configuration_access=Konfigurationszugriff:
+label_supla_provisioning_window=Provisionierungsfenster:
+supla_status_loading=Wird geladen&hellip;
+supla_value_yes=Ja
+supla_value_no=Nein
+supla_value_running=Aktiv
+supla_value_stopped=Gestoppt
+supla_value_unknown=Unbekannt
+supla_value_unlocked=Entsperrt (Geräte-AP)
+supla_value_locked=Heimnetzwerk
+supla_window_remaining=Offen &mdash; noch {seconds} s
+supla_window_closed=Geschlossen
+supla_configuration_unlocked_note=Die SUPLA-Konfiguration ist über den Setup-AP des Geräts entsperrt. Dieses Fenster schließt automatisch.
+supla_configuration_locked_note=SUPLA-Einstellungen können direkt über das Heimnetzwerk geändert werden. Der ESP-Setup-Access-Point bleibt zur Wiederherstellung verfügbar.
+button_save_restart=Speichern &amp; neu starten
+section_supla_reset=Kopplung zurücksetzen
+supla_reset_note=Hiermit wird die im Modul gespeicherte SUPLA-Zuweisung entfernt und eine neue Geräteidentität erstellt. Das alte Gerät wird dadurch nicht aus SUPLA Cloud entfernt.
+button_reset_pairing=Kopplung zurücksetzen
+supla_saving=Wird gespeichert&hellip;
+supla_saved_restart=Gespeichert. Das Gerät startet automatisch neu; verbinden Sie sich bei Bedarf erneut.
+supla_resetting=Kopplung wird zurückgesetzt&hellip;
+supla_reset_done=Kopplung zurückgesetzt. Das Gerät startet automatisch neu; verbinden Sie sich bei Bedarf erneut.
+supla_request_failed=Anfrage fehlgeschlagen. Verbindung prüfen und erneut versuchen.
+supla_validation_email_required=Geben Sie die E-Mail-Adresse des SUPLA-Kontos ein, bevor Sie SUPLA aktivieren.
+supla_validation_wifi_required=Konfigurieren Sie das Heim-WLAN, bevor Sie SUPLA aktivieren.
+supla_validation_email_invalid=Geben Sie eine gültige E-Mail-Adresse ein.
+supla_validation_server_invalid=Geben Sie einen Hostnamen oder eine IP-Adresse ohne Protokoll, Port, Pfad oder Leerzeichen ein.
+confirm_supla_reset=SUPLA-Kopplung zurücksetzen? Das Modul erhält eine neue Geräteidentität und startet neu. Das alte Gerät muss manuell aus SUPLA Cloud entfernt werden.

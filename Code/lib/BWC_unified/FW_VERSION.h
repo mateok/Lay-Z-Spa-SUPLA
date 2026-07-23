@@ -1,1 +1,1 @@
-#define FW_VERSION "2026-06-23-2100"
+#define FW_VERSION "v1.0.0-supla"

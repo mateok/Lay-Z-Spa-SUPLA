@@ -51,10 +51,10 @@
     <tr>
       <td>
         <label for="enableWM" data-i18n="label_enableWM">
-          Enable Soft AP (I don’t see a reason to uncheck this! You can lock yourself out!):
+          Enable the recovery setup AP after restart:
         </label>
         <span class="tooltip"
-          data-text="Enable ESP access point to be able to open this page before your network credentials are set. You’d want this on normally! If your network is unavailable, the ESP will fire up its own AP."
+          data-text="Starts the setup AP only during the bounded provisioning window after restart. It is not opened after an arbitrary Wi-Fi disconnect."
           data-i18n="[data-text]tooltip_enableWM">?</span>
       </td>
       <td>
@@ -187,8 +187,8 @@
       </td>
       <td>
         <select id="phyMode">
-          <option value="0">Auto (default)</option>
-          <option value="1">802.11b only (best range)</option>
+          <option value="0" data-i18n="option_phy_auto">Auto (default)</option>
+          <option value="1" data-i18n="option_phy_b">802.11b only (best range)</option>
           <option value="2">802.11g</option>
           <option value="3">802.11n</option>
         </select>
@@ -198,12 +198,14 @@
 </section>
 
 
-<!-- ==================== BUTTON “SAVE” ==================== -->
+<!-- ==================== BUTTON “SAVE & RESTART” ==================== -->
 <section>
   <table>
     <tr>
       <td colspan="2" style="text-align:center">
-        <button id="save" class="button" onclick="saveNetworkConfig()" data-i18n="button_save">Save</button>
+        <button id="save" type="button" class="button" onclick="saveNetworkConfig()"
+          data-i18n="button_save_restart">Save &amp; restart</button>
+        <p id="wifiSaveStatus" role="status" aria-live="polite"></p>
       </td>
     </tr>
   </table>
@@ -225,6 +227,12 @@
 <footer class="center">
   <button id="resetwifi" class="button_red" onclick="resetWifi()" data-i18n="btn_reset_wifi">reset WiFi</button>
 </footer>
+</div>
+
+<div hidden>
+  <span id="wifiTextSaving" data-i18n="supla_saving">Saving&hellip;</span>
+  <span id="wifiTextSaved" data-i18n="supla_saved_restart">Saved. The device is restarting automatically; reconnect if needed.</span>
+  <span id="wifiTextFailed" data-i18n="supla_request_failed">Request failed. Check the connection and try again.</span>
 </div>
 {% endblock %}
 

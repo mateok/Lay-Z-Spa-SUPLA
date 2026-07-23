@@ -1,0 +1,79 @@
+{% extends "../layout.html" %}
+
+{% block header_headline_title %}
+<span data-i18n="header_factory_reset">Factory settings</span>
+{% endblock %}
+
+{% block top_navigation %}
+{% run use_component("topNavigation", "factoryreset") %}
+{% endblock %}
+
+{% block content %}
+<section>
+    <h2 data-i18n="section_factory_reset">Restore factory settings</h2>
+    <p data-i18n="factory_reset_warning">
+        This operation permanently removes all settings and restarts the ESP.
+    </p>
+    <p data-i18n="factory_reset_details">
+        Home Wi-Fi credentials, MQTT and SUPLA configuration, hardware and SPA
+        settings, schedules, statistics and runtime files will be deleted.
+        Firmware and the built-in web interface will remain installed.
+    </p>
+    <p class="center">
+        <button id="factoryResetButton" class="button_red" type="button"
+            onclick="factoryReset()" data-i18n="button_factory_reset">
+            Restore factory settings
+        </button>
+    </p>
+    <p id="factoryResetStatus" role="status" aria-live="polite"></p>
+</section>
+{% endblock %}
+
+{% block embed_scripts %}
+<script>
+    async function factoryReset() {
+        const confirmation = getTranslation(
+            'confirm_factory_reset',
+            'Delete every saved setting and restart the ESP? This cannot be undone.'
+        )
+        if (!window.confirm(confirmation)) return
+
+        const button = document.getElementById('factoryResetButton')
+        const status = document.getElementById('factoryResetStatus')
+        button.disabled = true
+        status.textContent = getTranslation('factory_reset_working', 'Removing settings…')
+        status.style.color = ''
+
+        try {
+            const tokenResponse = await fetch('/getsupla/?_=' + Date.now(), {
+                cache: 'no-store'
+            })
+            if (!tokenResponse.ok) throw new Error('token')
+            const tokenData = await tokenResponse.json()
+            if (typeof tokenData.csrfToken !== 'string' || !tokenData.csrfToken) {
+                throw new Error('token')
+            }
+
+            const response = await fetch('/factory-reset/', {
+                method: 'POST',
+                cache: 'no-store',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({csrfToken: tokenData.csrfToken})
+            })
+            if (!response.ok) throw new Error('request')
+
+            status.textContent = getTranslation(
+                'factory_reset_done',
+                'Settings removed. The ESP is restarting. Connect to its setup Wi-Fi network.'
+            )
+        } catch (error) {
+            button.disabled = false
+            status.textContent = getTranslation(
+                'factory_reset_failed',
+                'Factory reset failed. Check the connection and try again.'
+            )
+            status.style.color = '#b00020'
+        }
+    }
+</script>
+{% endblock %}

@@ -21,7 +21,7 @@ function togglePlainText(id) {
 function validatePassword(id) {
     const x = document.getElementById(id)
     if (x.value == "<enter password>") {
-        alert("Please enter a password to continue.")
+        alert(getTranslation('alert_enter_password'))
         return false
     }
     return true

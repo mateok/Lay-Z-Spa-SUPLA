@@ -1,0 +1,397 @@
+{% extends "../layout.html" %}
+
+{% block header_headline_title %}
+<span data-i18n="header_suplaconfig">SUPLA Config</span>
+{% endblock %}
+
+{% block top_navigation %}
+{% run use_component("topNavigation", "supla") %}
+{% endblock %}
+
+{% block content %}
+<section>
+    <h2 data-i18n="section_supla_connection">Cloud connection</h2>
+    <p data-i18n="supla_setup_note">
+        Enter the email address used by your SUPLA Cloud account. No SUPLA password is stored on this device.
+        Before the first connection, enable device registration in SUPLA Cloud. The ESP setup Wi-Fi password is
+        layzspam0dule.
+    </p>
+    <p id="suplaWifiNotice">
+        <span data-i18n="supla_wifi_setup_note">First configure the ESP connection to your home 2.4 GHz Wi-Fi network.</span>
+        <a href="/wifi.html" data-i18n="supla_wifi_setup_link">Open Network Config</a>
+    </p>
+    <table>
+        <tr>
+            <td>
+                <label for="suplaEnabled" data-i18n="label_enable_supla">Enable SUPLA:</label>
+                <span class="tooltip"
+                    data-text="Connect this module directly to SUPLA Cloud. The existing local web interface and MQTT integration remain available."
+                    data-i18n="[data-text]tooltip_enable_supla">?</span>
+            </td>
+            <td><input type="checkbox" id="suplaEnabled" disabled></td>
+        </tr>
+        <tr>
+            <td>
+                <label for="suplaEmail" data-i18n="label_supla_email">SUPLA account email:</label>
+                <span class="tooltip"
+                    data-text="This identifies the SUPLA Cloud account that will receive the device. It is not a login performed by the module."
+                    data-i18n="[data-text]tooltip_supla_email">?</span>
+            </td>
+            <td>
+                <input type="email" id="suplaEmail" maxlength="255" autocomplete="off"
+                    inputmode="email" placeholder="name@example.com"
+                    data-i18n="[placeholder]placeholder_supla_email" disabled>
+            </td>
+        </tr>
+        <tr>
+            <td>
+                <label for="suplaServer" data-i18n="label_supla_server">SUPLA server:</label>
+                <span class="tooltip"
+                    data-text="Optional. Leave empty to use SUPLA Cloud autodiscovery. Enter only a host name or IP address, without https:// or a path."
+                    data-i18n="[data-text]tooltip_supla_server">?</span>
+            </td>
+            <td>
+                <input type="text" id="suplaServer" maxlength="64" autocomplete="off"
+                    autocapitalize="none" spellcheck="false" placeholder="Autodiscovery (recommended)"
+                    data-i18n="[placeholder]placeholder_supla_server" disabled>
+            </td>
+        </tr>
+    </table>
+</section>
+
+<section>
+    <h2 data-i18n="section_supla_status">Status</h2>
+    <table aria-live="polite">
+        <tr>
+            <td data-i18n="label_supla_configured">Pairing configured:</td>
+            <td><output id="suplaConfigured">&hellip;</output></td>
+        </tr>
+        <tr>
+            <td data-i18n="label_supla_wifi_configured">Home Wi-Fi configured:</td>
+            <td><output id="suplaWifiConfigured">&hellip;</output></td>
+        </tr>
+        <tr>
+            <td data-i18n="label_supla_running">SUPLA client:</td>
+            <td><output id="suplaRunning">&hellip;</output></td>
+        </tr>
+        <tr>
+            <td data-i18n="label_supla_cloud_status">Cloud status:</td>
+            <td><output id="suplaStatus" data-i18n="supla_status_loading">Loading&hellip;</output></td>
+        </tr>
+        <tr>
+            <td data-i18n="label_supla_configuration_access">Configuration access:</td>
+            <td><output id="suplaConfigurationAccess">&hellip;</output></td>
+        </tr>
+        <tr>
+            <td data-i18n="label_supla_provisioning_window">Provisioning window:</td>
+            <td><output id="suplaProvisioningWindow">&hellip;</output></td>
+        </tr>
+    </table>
+    <p id="suplaConfigurationNotice" role="status" aria-live="polite"></p>
+</section>
+
+<section class="center">
+    <button id="saveSupla" class="button" type="button" onclick="saveSuplaConfig()" disabled
+        data-i18n="button_save_restart">Save &amp; restart</button>
+</section>
+
+<section>
+    <h2 data-i18n="section_supla_reset">Reset pairing</h2>
+    <p data-i18n="supla_reset_note">
+        This removes the SUPLA assignment stored by the module and creates a new device identity.
+        It does not remove the old device from SUPLA Cloud.
+    </p>
+    <p class="center">
+        <button id="resetSupla" class="button_red" type="button" onclick="resetSuplaPairing()" disabled
+            data-i18n="button_reset_pairing">Reset pairing</button>
+    </p>
+</section>
+
+<div id="suplaTranslations" hidden>
+    <span id="suplaTextYes" data-i18n="supla_value_yes">Yes</span>
+    <span id="suplaTextNo" data-i18n="supla_value_no">No</span>
+    <span id="suplaTextRunning" data-i18n="supla_value_running">Running</span>
+    <span id="suplaTextStopped" data-i18n="supla_value_stopped">Stopped</span>
+    <span id="suplaTextUnknown" data-i18n="supla_value_unknown">Unknown</span>
+    <span id="suplaTextSaving" data-i18n="supla_saving">Saving&hellip;</span>
+    <span id="suplaTextSaved" data-i18n="supla_saved_restart">Saved. The device is restarting automatically; reconnect if needed.</span>
+    <span id="suplaTextResetting" data-i18n="supla_resetting">Resetting pairing&hellip;</span>
+    <span id="suplaTextResetDone" data-i18n="supla_reset_done">Pairing reset. The device is restarting automatically; reconnect if needed.</span>
+    <span id="suplaTextRequestFailed" data-i18n="supla_request_failed">Request failed. Check the connection and try again.</span>
+    <span id="suplaTextEmailRequired" data-i18n="supla_validation_email_required">Enter the SUPLA account email before enabling SUPLA.</span>
+    <span id="suplaTextEmailInvalid" data-i18n="supla_validation_email_invalid">Enter a valid email address.</span>
+    <span id="suplaTextEmailConfigured" data-i18n="placeholder_supla_email_configured">Configured &mdash; enter a new address only to change account</span>
+    <span id="suplaTextServerInvalid" data-i18n="supla_validation_server_invalid">Enter a host name or IP address without a protocol, port, path or spaces.</span>
+    <span id="suplaTextWifiRequired" data-i18n="supla_validation_wifi_required">Configure the home Wi-Fi network before enabling SUPLA.</span>
+    <span id="suplaTextAccessUnlocked" data-i18n="supla_value_unlocked">Unlocked (device AP)</span>
+    <span id="suplaTextAccessLocked" data-i18n="supla_value_locked">Locked (read-only)</span>
+    <span id="suplaTextWindowRemaining" data-i18n="supla_window_remaining">Open &mdash; {seconds} s remaining</span>
+    <span id="suplaTextWindowClosed" data-i18n="supla_window_closed">Closed</span>
+    <span id="suplaTextConfigurationUnlocked" data-i18n="supla_configuration_unlocked_note">SUPLA configuration is unlocked through the device setup AP. This window closes automatically.</span>
+    <span id="suplaTextConfigurationLocked" data-i18n="supla_configuration_locked_note">Configuration is read-only. SUPLA changes are possible only through the device setup AP during the provisioning window after a restart.</span>
+    <span id="suplaTextResetConfirm" data-i18n="confirm_supla_reset">Reset SUPLA pairing? The module will get a new device identity and restart. The old device must be removed from SUPLA Cloud manually.</span>
+</div>
+{% endblock %}
+
+{% block embed_scripts %}
+<script>
+    var suplaCsrfToken = ''
+    var suplaEmailConfigured = false
+    var suplaConfiguredState = null
+    var suplaWifiConfiguredState = null
+    var suplaRunningState = null
+    var suplaCloudStatus = null
+    var suplaConfigurationUnlocked = false
+    var suplaProvisioningSecondsRemaining = 0
+    var suplaProvisioningTimer = null
+
+    function suplaText(id) {
+        return document.getElementById(id).textContent
+    }
+
+    function renderSuplaLocalizedState() {
+        if (suplaConfiguredState !== null) {
+            document.getElementById('suplaConfigured').textContent = suplaConfiguredState
+                ? suplaText('suplaTextYes') : suplaText('suplaTextNo')
+        }
+        if (suplaWifiConfiguredState !== null) {
+            document.getElementById('suplaWifiConfigured').textContent = suplaWifiConfiguredState
+                ? suplaText('suplaTextYes') : suplaText('suplaTextNo')
+            document.getElementById('suplaWifiNotice').style.color = suplaWifiConfiguredState
+                ? '' : '#b00020'
+        }
+        if (suplaRunningState !== null) {
+            document.getElementById('suplaRunning').textContent = suplaRunningState
+                ? suplaText('suplaTextRunning') : suplaText('suplaTextStopped')
+        }
+        if (suplaCloudStatus !== null) {
+            var statusKey = 'supla_cloud_' + suplaCloudStatus
+                .toLowerCase()
+                .replace(/[^a-z0-9]+/g, '_')
+                .replace(/^_|_$/g, '')
+            setSuplaMessage(getTranslation(statusKey, suplaText('suplaTextUnknown')), false)
+        }
+        if (suplaEmailConfigured) {
+            document.getElementById('suplaEmail').placeholder = suplaText('suplaTextEmailConfigured')
+        }
+        document.getElementById('suplaConfigurationAccess').textContent = suplaConfigurationUnlocked
+            ? suplaText('suplaTextAccessUnlocked') : suplaText('suplaTextAccessLocked')
+        document.getElementById('suplaProvisioningWindow').textContent = suplaProvisioningSecondsRemaining > 0
+            ? suplaText('suplaTextWindowRemaining').replace('{seconds}', suplaProvisioningSecondsRemaining)
+            : suplaText('suplaTextWindowClosed')
+
+        var notice = document.getElementById('suplaConfigurationNotice')
+        notice.textContent = suplaConfigurationUnlocked
+            ? suplaText('suplaTextConfigurationUnlocked') : suplaText('suplaTextConfigurationLocked')
+        notice.style.color = ''
+    }
+
+    function setSuplaMessage(message, isError) {
+        var output = document.getElementById('suplaStatus')
+        output.textContent = message
+        output.style.color = isError ? '#b00020' : ''
+    }
+
+    function setSuplaButtonsDisabled(disabled) {
+        document.getElementById('saveSupla').disabled = disabled ||
+            !suplaCsrfToken
+        document.getElementById('resetSupla').disabled = disabled ||
+            !suplaCsrfToken || suplaConfiguredState !== true
+    }
+
+    function setSuplaFormUnlocked(unlocked) {
+        document.getElementById('suplaEnabled').disabled = !unlocked
+        document.getElementById('suplaEmail').disabled = !unlocked
+        document.getElementById('suplaServer').disabled = !unlocked
+        renderSuplaLocalizedState()
+        setSuplaButtonsDisabled(false)
+    }
+
+    function startSuplaProvisioningCountdown() {
+        if (suplaProvisioningTimer !== null) {
+            window.clearInterval(suplaProvisioningTimer)
+            suplaProvisioningTimer = null
+        }
+
+        renderSuplaLocalizedState()
+        if (suplaProvisioningSecondsRemaining === 0) return
+
+        suplaProvisioningTimer = window.setInterval(function () {
+            if (suplaProvisioningSecondsRemaining > 0) suplaProvisioningSecondsRemaining--
+            if (suplaProvisioningSecondsRemaining === 0) {
+                suplaConfigurationUnlocked = false
+                setSuplaFormUnlocked(!!suplaCsrfToken)
+                window.clearInterval(suplaProvisioningTimer)
+                suplaProvisioningTimer = null
+            }
+            renderSuplaLocalizedState()
+        }, 1000)
+    }
+
+    function suplaRequestError(req) {
+        if (req.responseText) {
+            try {
+                var response = JSON.parse(req.responseText)
+                if (response.code) {
+                    var errorKey = 'supla_error_' + response.code
+                        .toLowerCase()
+                        .replace(/[^a-z0-9]+/g, '_')
+                    return getTranslation(errorKey, response.error || suplaText('suplaTextRequestFailed'))
+                }
+                if (response.error) return response.error
+            } catch (error) {
+                return req.responseText
+            }
+        }
+        return suplaText('suplaTextRequestFailed')
+    }
+
+    function loadSuplaConfig() {
+        var req = new XMLHttpRequest()
+        req.open('GET', '/getsupla/?_=' + Date.now())
+        req.onreadystatechange = function () {
+            if (this.readyState !== 4) return
+
+            if (this.status < 200 || this.status >= 300) {
+                setSuplaMessage(suplaText('suplaTextRequestFailed'), true)
+                return
+            }
+
+            try {
+                var json = JSON.parse(this.responseText)
+                suplaCsrfToken = typeof json.csrfToken === 'string' ? json.csrfToken : ''
+                suplaEmailConfigured = !!json.emailConfigured
+                suplaConfiguredState = !!json.configured
+                suplaWifiConfiguredState = !!json.wifiConfigured
+                suplaRunningState = !!json.running
+                suplaConfigurationUnlocked = !!json.configurationUnlocked
+                var remaining = Number(json.provisioningSecondsRemaining)
+                suplaProvisioningSecondsRemaining = isFinite(remaining) && remaining > 0
+                    ? Math.floor(remaining) : 0
+                document.getElementById('suplaEnabled').checked = !!json.enabled
+                document.getElementById('suplaEmail').value = ''
+                document.getElementById('suplaServer').value = json.server || ''
+                suplaCloudStatus = json.status || 'unknown'
+                renderSuplaLocalizedState()
+                setSuplaFormUnlocked(!!suplaCsrfToken)
+                startSuplaProvisioningCountdown()
+            } catch (error) {
+                setSuplaMessage(suplaText('suplaTextRequestFailed'), true)
+            }
+        }
+        req.onerror = function () {
+            setSuplaMessage(suplaText('suplaTextRequestFailed'), true)
+        }
+        req.send()
+    }
+
+    function validateSuplaConfig() {
+        var enabled = document.getElementById('suplaEnabled').checked
+        var email = document.getElementById('suplaEmail')
+        var server = document.getElementById('suplaServer').value.trim()
+
+        email.value = email.value.trim()
+        if (enabled && email.value === '' && !suplaEmailConfigured) {
+            alert(suplaText('suplaTextEmailRequired'))
+            email.focus()
+            return false
+        }
+        if (enabled && !suplaWifiConfiguredState) {
+            alert(suplaText('suplaTextWifiRequired'))
+            return false
+        }
+        if (email.value !== '' && !email.checkValidity()) {
+            alert(suplaText('suplaTextEmailInvalid'))
+            email.focus()
+            return false
+        }
+        if (!isValidSuplaServerName(server)) {
+            alert(suplaText('suplaTextServerInvalid'))
+            document.getElementById('suplaServer').focus()
+            return false
+        }
+        return true
+    }
+
+    function isValidSuplaServerName(server) {
+        if (server === '') return true
+        if (server.length > 64 || !/^[A-Za-z0-9.-]+$/.test(server)) return false
+
+        var labels = server.split('.')
+        for (var index = 0; index < labels.length; index++) {
+            var label = labels[index]
+            if (label === '' || label.charAt(0) === '-' || label.charAt(label.length - 1) === '-') {
+                return false
+            }
+        }
+        return true
+    }
+
+    function postSupla(path, payload, successMessage) {
+        if (!suplaCsrfToken) {
+            setSuplaMessage(suplaText('suplaTextConfigurationLocked'), true)
+            setSuplaButtonsDisabled(true)
+            return
+        }
+
+        setSuplaButtonsDisabled(true)
+        var req = new XMLHttpRequest()
+        req.open('POST', path)
+        req.setRequestHeader('Content-Type', 'application/json')
+        req.onreadystatechange = function () {
+            if (this.readyState !== 4) return
+
+            if (this.status >= 200 && this.status < 300) {
+                suplaCloudStatus = null
+                setSuplaMessage(successMessage, false)
+                suplaCsrfToken = ''
+                suplaConfigurationUnlocked = false
+                suplaProvisioningSecondsRemaining = 0
+                if (suplaProvisioningTimer !== null) {
+                    window.clearInterval(suplaProvisioningTimer)
+                    suplaProvisioningTimer = null
+                }
+                setSuplaFormUnlocked(false)
+                renderSuplaLocalizedState()
+            } else {
+                setSuplaMessage(suplaRequestError(this), true)
+                setSuplaButtonsDisabled(false)
+            }
+        }
+        req.onerror = function () {
+            setSuplaMessage(suplaText('suplaTextRequestFailed'), true)
+            setSuplaButtonsDisabled(false)
+        }
+        var requestPayload = payload || {}
+        requestPayload.csrfToken = suplaCsrfToken
+        req.send(JSON.stringify(requestPayload))
+    }
+
+    function saveSuplaConfig() {
+        if (!validateSuplaConfig()) return
+
+        setSuplaMessage(suplaText('suplaTextSaving'), false)
+        postSupla('/setsupla/', {
+            enabled: document.getElementById('suplaEnabled').checked,
+            email: document.getElementById('suplaEmail').value.trim(),
+            server: document.getElementById('suplaServer').value.trim()
+        }, suplaText('suplaTextSaved'))
+    }
+
+    function resetSuplaPairing() {
+        if (!window.confirm(suplaText('suplaTextResetConfirm'))) return
+
+        setSuplaMessage(suplaText('suplaTextResetting'), false)
+        postSupla('/resetsupla/', {}, suplaText('suplaTextResetDone'))
+    }
+
+    if (window.MutationObserver) {
+        new MutationObserver(renderSuplaLocalizedState).observe(
+            document.getElementById('suplaTranslations'),
+            { childList: true, subtree: true, characterData: true }
+        )
+    }
+
+    loadSuplaConfig()
+</script>
+{% endblock %}

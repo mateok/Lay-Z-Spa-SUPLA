@@ -1,5 +1,6 @@
 #pragma once
 #include <Arduino.h>
+#include <cstring>
 
 /*Indicies to access binary codes or pretty button names.*/
 enum Buttons: byte
@@ -312,3 +313,99 @@ struct sHW_config_eeprom_t
     bool hasTempSensor;
     bool power_levels_override;
 };
+
+// Factory wiring for the direct Wemos D1 mini installation documented by
+// this firmware. Values are Dx labels (not raw GPIO numbers); BWC converts
+// them through the board's D0..D8 mapping before configuring the buses.
+constexpr uint8_t DEFAULT_CIO_PINS[] = {4, 3, 2};
+constexpr uint8_t DEFAULT_DSP_PINS[] = {7, 6, 5, 0};
+constexpr uint8_t DEFAULT_TEMPERATURE_SENSOR_PIN = 8;
+
+inline sHW_config_eeprom_t makeDefaultHardwareConfig()
+{
+    sHW_config_eeprom_t config{};
+    config.cioNo = MIAMI2021;
+    config.dspNo = MIAMI2021;
+    config.pcbname[0] = 'c';
+    config.pcbname[1] = 'u';
+    config.pcbname[2] = 's';
+    config.pcbname[3] = 't';
+    config.pcbname[4] = 'o';
+    config.pcbname[5] = 'm';
+    config.pcbname[6] = '\0';
+    for(size_t i = 0; i < 3; ++i) config.pins[i] = DEFAULT_CIO_PINS[i];
+    for(size_t i = 0; i < 4; ++i) config.pins[3 + i] = DEFAULT_DSP_PINS[i];
+    config.pins[7] = DEFAULT_TEMPERATURE_SENSOR_PIN;
+    config.hasTempSensor = false;
+    config.power_levels_override = false;
+    return config;
+}
+
+inline bool isValidHardwareConfig(const sHW_config_eeprom_t& config)
+{
+    if(memcmp(config.tag, "HWCF", sizeof(config.tag)) != 0 ||
+       config.cioNo > M54123 || config.dspNo > M54123 ||
+       memchr(config.pcbname, '\0', sizeof(config.pcbname)) == nullptr)
+        return false;
+
+    for(size_t i = 0; i < 8; ++i)
+        if(config.pins[i] < 0 || config.pins[i] > 8) return false;
+
+    // Only pins used by the selected buses must be unique. Four-wire models
+    // legitimately store zero in the unused clock/CS/audio slots.
+    bool active[8] = {true, true, false, true, true, false, false,
+                      config.hasTempSensor};
+    if(config.cioNo <= M54149E) active[2] = true;
+    if(config.dspNo <= M54149E)
+    {
+        active[5] = true;
+        active[6] = true;
+    }
+
+    for(size_t i = 0; i < 8; ++i)
+    {
+        if(!active[i]) continue;
+        for(size_t j = i + 1; j < 8; ++j)
+            if(active[j] && config.pins[i] == config.pins[j]) return false;
+    }
+    return true;
+}
+
+// SUPLA credentials are kept in EEPROM so they survive LittleFS updates.
+// Keep this structure independent of the SuplaDevice headers: the sizes below
+// mirror the public SUPLA protocol limits (server 65, e-mail 256, GUID/AuthKey
+// 16 bytes each).
+constexpr uint8_t SUPLA_CONFIG_VERSION = 2;
+constexpr size_t SUPLA_SERVER_MAX_SIZE = 65;
+constexpr size_t SUPLA_EMAIL_MAX_SIZE = 256;
+constexpr size_t SUPLA_ID_SIZE = 16;
+constexpr size_t SUPLA_SETUP_PASSWORD_MAX_SIZE = 64;
+
+#pragma pack(push, 1)
+struct sSupla_info_eeprom_t
+{
+    char tag[4] = {'S', 'U', 'P', 'L'};
+    uint8_t version = SUPLA_CONFIG_VERSION;
+    bool enabled = false;
+    uint8_t guid[SUPLA_ID_SIZE] = {};
+    uint8_t authKey[SUPLA_ID_SIZE] = {};
+    char server[SUPLA_SERVER_MAX_SIZE] = {};
+    char email[SUPLA_EMAIL_MAX_SIZE] = {};
+    char setupPassword[SUPLA_SETUP_PASSWORD_MAX_SIZE] = {};
+    uint32_t checksum = 0;
+};
+#pragma pack(pop)
+
+// Centralized EEPROM layout. EEPROM.begin() has to cover the complete sector:
+// committing a shorter buffer would erase configuration blocks placed after it.
+constexpr size_t WIFI_CONFIG_EEPROM_OFFSET = 0;
+constexpr size_t MQTT_CONFIG_EEPROM_OFFSET =
+    WIFI_CONFIG_EEPROM_OFFSET + sizeof(sWifi_info_eeprom_t);
+constexpr size_t HW_CONFIG_EEPROM_OFFSET =
+    MQTT_CONFIG_EEPROM_OFFSET + sizeof(sMQTT_info_eeprom_t);
+constexpr size_t SUPLA_CONFIG_EEPROM_OFFSET =
+    HW_CONFIG_EEPROM_OFFSET + sizeof(sHW_config_eeprom_t);
+constexpr size_t EEPROM_CONFIG_SIZE =
+    SUPLA_CONFIG_EEPROM_OFFSET + sizeof(sSupla_info_eeprom_t);
+static_assert(EEPROM_CONFIG_SIZE <= 4096,
+              "Persistent configuration must fit in one ESP EEPROM sector");

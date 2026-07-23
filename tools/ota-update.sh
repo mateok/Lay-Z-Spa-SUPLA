@@ -24,7 +24,7 @@
 set -euo pipefail
 
 DEVICE_IP=""
-PASSWORD="esp8266"
+PASSWORD="layzspam0dule"
 IMAGE=""
 SPIFFS_FLAG=""
 DEVICE_PORT=8266

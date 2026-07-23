@@ -94,7 +94,7 @@ function loadWebConfig() {
 }
 
 function resetTotals() {
-    if (confirm('Do you really want to reset the totals?')) {
+    if (confirm(getTranslation('confirm_reset_totals', 'Czy na pewno wyzerować liczniki?'))) {
         buttonConfirm(document.getElementById('reset'));
         sendCommand('resetTotals');
     }
@@ -158,22 +158,31 @@ function handlemsg(e) {
 
     if (msgobj.CONTENT == "OTHER") {
         // MQTT status
-        mqtt_states = [
-            "CONNECTION_TIMEOUT", // -4 / the server didn't respond within the keepalive time
-            "CONNECTION_LOST", // -3 / the network connection was broken
-            "CONNECT_FAILED", // -2 / the network connection failed
-            "DISCONNECTED", // -1 / the client is disconnected cleanly
-            "CONNECTED", // 0 / the client is connected
-            "CONNECT_BAD_PROTOCOL", // 1 / the server doesn't support the requested version of MQTT
-            "CONNECT_BAD_CLIENT_ID", // 2 / the server rejected the client identifier
-            "CONNECT_UNAVAILABLE", // 3 / the server was unable to accept the connection
-            "CONNECT_BAD_CREDENTIALS", // 4 / the username/password were rejected
-            "CONNECT_UNAUTHORIZED", // 5 / the client was not authorized to connect
+        const mqttStateKeys = [
+            "mqtt_connection_timeout", // -4 / the server didn't respond within the keepalive time
+            "mqtt_connection_lost", // -3 / the network connection was broken
+            "mqtt_connect_failed", // -2 / the network connection failed
+            "mqtt_disconnected", // -1 / the client is disconnected cleanly
+            "mqtt_connected", // 0 / the client is connected
+            "mqtt_bad_protocol", // 1 / the server doesn't support the requested version of MQTT
+            "mqtt_bad_client_id", // 2 / the server rejected the client identifier
+            "mqtt_unavailable", // 3 / the server was unable to accept the connection
+            "mqtt_bad_credentials", // 4 / the username/password were rejected
+            "mqtt_unauthorized", // 5 / the client was not authorized to connect
         ]
-        document.getElementById("mqtt").innerHTML = "MQTT: " + mqtt_states[msgobj.MQTT + 4]
-        document.getElementById("fw").innerHTML = "Firmware: " + msgobj.FW
-        document.getElementById("model").innerHTML = "Model: " + msgobj.MODEL
-        document.getElementById("rssi").innerHTML = "RSSI: " + msgobj.RSSI
+        const mqttStateKey = mqttStateKeys[msgobj.MQTT + 4] || 'supla_value_unknown'
+        document.getElementById("mqtt").textContent = getTranslation('footer_mqtt_label', 'MQTT') + ': ' +
+            getTranslation(mqttStateKey, 'nieznany')
+        const suplaStatus = typeof msgobj.SUPLA === 'string' ? msgobj.SUPLA : 'unknown'
+        const suplaStatusKey = 'supla_cloud_' + suplaStatus
+            .toLowerCase()
+            .replace(/[^a-z0-9]+/g, '_')
+            .replace(/^_|_$/g, '')
+        document.getElementById("supla").textContent = getTranslation('footer_supla_label', 'SUPLA') + ': ' +
+            getTranslation(suplaStatusKey, suplaStatus)
+        document.getElementById("fw").textContent = getTranslation('footer_fw_label', 'Firmware') + ': ' + msgobj.FW
+        document.getElementById("model").textContent = getTranslation('footer_model_label', 'Model') + ': ' + msgobj.MODEL
+        document.getElementById("rssi").textContent = 'RSSI: ' + msgobj.RSSI
 
         // hydro jets available
         document.getElementById("jets").style.display = msgobj.HASJETS ? "table-cell" : "none"
@@ -268,25 +277,25 @@ function handlemsg(e) {
         // chlorine add reset timer
         var clDate = (Date.now() / 1000 - msgobj.CLTIME) / (24 * 3600.0)
         var clDateRound = Math.round(clDate)
-        document.getElementById("cltimer").innerHTML = clDateRound + " day" + (clDateRound != 1 ? "s" : "")
+        document.getElementById("cltimer").textContent = formatDayCount(clDateRound, msgobj.CLTIME > 0)
         document.getElementById("cltimerbtn").className = clDate > msgobj.CLINT ? "button_red" : "button"
 
         // filter change reset timer
         var fDate = (Date.now() / 1000 - msgobj.FREP) / (24 * 3600.0)
         var fDateRound = Math.round(fDate)
-        document.getElementById("freplacetimer").innerHTML = fDateRound + " day" + (fDateRound != 1 ? "s" : "")
+        document.getElementById("freplacetimer").textContent = formatDayCount(fDateRound, msgobj.FREP > 0)
         document.getElementById("freplacetimerbtn").className = fDate > msgobj.FREPI ? "button_red" : "button"
 
         // filter clean reset timer
         var fDate = (Date.now() / 1000 - msgobj.FCLE) / (24 * 3600.0)
         var fDateRound = Math.round(fDate)
-        document.getElementById("fcleantimer").innerHTML = fDateRound + " day" + (fDateRound != 1 ? "s" : "")
+        document.getElementById("fcleantimer").textContent = formatDayCount(fDateRound, msgobj.FCLE > 0)
         document.getElementById("fcleantimerbtn").className = fDate > msgobj.FCLEI ? "button_red" : "button"
 
         // filter rinse reset timer
         var fDate = (Date.now() / 1000 - msgobj.FRIN) / (24 * 3600.0)
         var fDateRound = Math.round(fDate)
-        document.getElementById("frinsetimer").innerHTML = fDateRound + " day" + (fDateRound != 1 ? "s" : "")
+        document.getElementById("frinsetimer").textContent = formatDayCount(fDateRound, msgobj.FRIN > 0)
         document.getElementById("frinsetimerbtn").className = fDate > msgobj.FRINI ? "button_red" : "button"
 
         // statistics
@@ -296,11 +305,26 @@ function handlemsg(e) {
         document.getElementById("filtertime").innerHTML = s2dhms(msgobj.PUMPTIME)
         document.getElementById("jettime").innerHTML = s2dhms(msgobj.JETTIME)
         document.getElementById("cost").innerHTML = msgobj.COST.toFixed(2)
-        document.getElementById("t2r").innerHTML = s2dhms(msgobj.T2R * 3600) + " (" + msgobj.RS + ")"
+        const readyStatusKeys = {
+            'Ready': 'ready_status_ready',
+            'Never': 'ready_status_never',
+            'Not ready': 'ready_status_not_ready'
+        }
+        const readyStatus = getTranslation(readyStatusKeys[msgobj.RS] || 'supla_value_unknown', 'nieznany')
+        document.getElementById("t2r").textContent = s2dhms(msgobj.T2R * 3600) + " (" + readyStatus + ")"
     }
 }
 
+function formatDayCount(value, valid = true) {
+    if (!valid) return getTranslation('value_no_data', 'brak danych')
+    if (getLangueChoisie() !== 'pl-PL') {
+        return value + " day" + (value != 1 ? "s" : "")
+    }
+    return value + ' ' + (value === 1 ? 'dzień' : 'dni')
+}
+
 function s2dhms(val) {
+    if (!Number.isFinite(val) || val < 0) return '—'
     var day = 3600 * 24
     var hour = 3600
     var minute = 60

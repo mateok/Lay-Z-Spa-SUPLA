@@ -32,14 +32,16 @@ function loadNetworkConfig() {
 function saveNetworkConfig() {
     if (!validatePassword('apPwd')) return;
 
-    buttonConfirm(
-    document.getElementById('save'),
-    "saved &check; (Don't forget to restart the ESP.)",
-    6
-    );
+    var button = document.getElementById('save');
+    var status = document.getElementById('wifiSaveStatus');
+    button.disabled = true;
+    status.textContent = document.getElementById('wifiTextSaving').textContent;
+    status.style.color = '';
 
     var req = new XMLHttpRequest();
     req.open('POST', '/setwifi/');
+    req.setRequestHeader('Content-Type', 'application/json');
+    req.timeout = 8000;
     var json = {
     enableAp:         document.getElementById('enableAp').checked,
     apSsid:           document.getElementById('apSsid').value,
@@ -56,6 +58,21 @@ function saveNetworkConfig() {
     noModemSleep:     document.getElementById('noModemSleep').checked,
     phyMode:          parseInt(document.getElementById('phyMode').value, 10)
     };
+    req.onreadystatechange = function() {
+        if (this.readyState !== 4) return;
+        if (this.status >= 200 && this.status < 300) {
+            status.textContent = document.getElementById('wifiTextSaved').textContent;
+            document.getElementById('apPwd').value = '<enter password>';
+            return;
+        }
+        status.textContent = document.getElementById('wifiTextFailed').textContent;
+        status.style.color = '#b00020';
+        button.disabled = false;
+    };
+    req.onerror = req.ontimeout = function() {
+        status.textContent = document.getElementById('wifiTextFailed').textContent;
+        status.style.color = '#b00020';
+        button.disabled = false;
+    };
     req.send(JSON.stringify(json));
-    document.getElementById('apPwd').value = '<enter password>';
 }

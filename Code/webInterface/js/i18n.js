@@ -1,13 +1,13 @@
 // i18n.js
 
 const LANG_STORAGE_KEY = 'langueSPA'
-const DEFAULT_LANG = 'en-EN'
+const DEFAULT_LANG = 'pl-PL'
 
-function getTranslation(key) {
+function getTranslation(key, fallback = key) {
     if (window.translations && window.translations[key]) {
         return window.translations[key]
     }
-    return key
+    return fallback
 }
 
 function getLangueChoisie() {
@@ -52,6 +52,7 @@ function parserTraduction(contenu) {
 
 
 function appliquerTraduction(dic) {
+    window.translations = dic
     document.querySelectorAll('[data-i18n]').forEach(elem => {
         const cle = elem.getAttribute('data-i18n')
 
@@ -92,29 +93,18 @@ function initI18n() {
         selectLang.addEventListener('change', () => {
             const nouvelleLang = selectLang.value
             setLangueChoisie(nouvelleLang)
-
-            // On ne charge le fichier de traduction que si ce n’est pas l’anglais
-            if (nouvelleLang !== DEFAULT_LANG) {
-                chargerFichierTraduction(nouvelleLang, contenu => {
-                    if (contenu) {
-                        const dic = parserTraduction(contenu)
-                        appliquerTraduction(dic)
-                    }
-                })
-            }
-            // si c'est 'en-EN', on n'affiche rien, on conserve le texte en dur
+            chargerFichierTraduction(nouvelleLang, contenu => {
+                if (contenu) appliquerTraduction(parserTraduction(contenu))
+            })
         })
     }
 
-    // Au chargement, on applique la traduction uniquement si la langue n'est pas 'en-EN'
-    if (langueActuelle !== DEFAULT_LANG) {
-        chargerFichierTraduction(langueActuelle, contenu => {
-            if (contenu) {
-                const dic = parserTraduction(contenu)
-                appliquerTraduction(dic)
-            }
-        })
-    }
+    // Every language, including the default one, is a real translation file.
+    // This keeps Polish as the deterministic factory language while preserving
+    // the existing language selector for users who prefer another language.
+    chargerFichierTraduction(langueActuelle, contenu => {
+        if (contenu) appliquerTraduction(parserTraduction(contenu))
+    })
 }
 
 document.addEventListener('DOMContentLoaded', initI18n)

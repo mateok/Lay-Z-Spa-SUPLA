@@ -1,10 +1,854 @@
 #include "main.h"
 #include "ports.h"
+#include "web_update_page.h"
+
+#include <algorithm>
+#include <cstring>
+#include <Updater.h>
+#include <flash_hal.h>
 
 #define WS_PERIOD 4.0
 // initial stack
 char *stack_start;
 uint32_t heap_water_mark;
+
+namespace
+{
+constexpr size_t SUPLA_CSRF_TOKEN_BYTES = 16;
+constexpr time_t MIN_VALID_UNIX_TIME = 1609459200; // 2021-01-01 UTC
+constexpr uint32_t SUPLA_FIRST_CLAIM_WINDOW_MS = 15UL * 60UL * 1000UL;
+constexpr uint32_t SUPLA_RECOVERY_WINDOW_MS = 2UL * 60UL * 1000UL;
+char suplaCsrfToken[SUPLA_CSRF_TOKEN_BYTES * 2 + 1] = {};
+uint32_t suplaProvisioningDeadlineMs = 0;
+uint32_t deviceRestartDeadlineMs = 0;
+bool factoryResetRequested = false;
+bool wifiConfigurationLoaded = false;
+volatile uint32_t wifiGotIpCount = 0;
+volatile uint32_t wifiDisconnectCount = 0;
+volatile uint32_t wifiLastDisconnectMillis = 0;
+volatile uint8_t wifiLastDisconnectReason = 0;
+
+constexpr uint32_t MIN_FIRMWARE_UPDATE_BYTES = 64UL * 1024UL;
+constexpr uint32_t WEB_UPDATE_STALL_TIMEOUT_MS = 30UL * 1000UL;
+constexpr uint32_t POST_FS_RESTART_RTC_OFFSET = 32; // after eboot's 128-byte command area
+constexpr uint32_t POST_FS_RESTART_MAGIC = 0x4C5A5350UL; // "LZSP"
+constexpr uint32_t POST_FS_RESTART_DELAY_MS = 120UL * 1000UL;
+
+enum class WebUpdateTarget : uint8_t
+{
+    NONE,
+    FIRMWARE,
+    FILESYSTEM
+};
+
+struct WebUpdateState
+{
+    WebUpdateTarget target = WebUpdateTarget::NONE;
+    bool started = false;
+    bool finished = false;
+    bool success = false;
+    uint32_t expectedSize = 0;
+    uint32_t receivedSize = 0;
+    char error[128] = {};
+};
+
+WebUpdateState webUpdateState;
+bool webUpdateInProgress = false;
+uint32_t webUpdateLastActivityMs = 0;
+bool postFilesystemRestartPending = false;
+uint32_t postFilesystemRestartEarliestMs = 0;
+
+class CountingPrint final : public Print
+{
+    public:
+        size_t write(uint8_t) override
+        {
+            ++count_;
+            return 1;
+        }
+
+        size_t write(const uint8_t*, size_t size) override
+        {
+            count_ += size;
+            return size;
+        }
+
+        size_t count() const { return count_; }
+
+    private:
+        size_t count_ = 0;
+};
+
+class BufferedPrint final : public Print
+{
+    public:
+        explicit BufferedPrint(Print& destination) : destination_(destination) {}
+
+        size_t write(uint8_t value) override
+        {
+            return write(&value, 1);
+        }
+
+        size_t write(const uint8_t* data, size_t size) override
+        {
+            if(data == nullptr && size != 0)
+            {
+                setWriteError();
+                return 0;
+            }
+
+            size_t consumed = 0;
+            while(consumed < size)
+            {
+                const size_t available = sizeof(buffer_) - used_;
+                const size_t chunk = std::min(available, size - consumed);
+                memcpy(buffer_ + used_, data + consumed, chunk);
+                used_ += chunk;
+                consumed += chunk;
+                if(used_ == sizeof(buffer_) && !flushBuffer())
+                    return consumed;
+            }
+            return consumed;
+        }
+
+        bool finish()
+        {
+            return flushBuffer() && getWriteError() == 0;
+        }
+
+    private:
+        bool flushBuffer()
+        {
+            if(used_ == 0) return getWriteError() == 0;
+            const size_t written = destination_.write(buffer_, used_);
+            if(written != used_)
+            {
+                setWriteError();
+                return false;
+            }
+            used_ = 0;
+            return true;
+        }
+
+        Print& destination_;
+        uint8_t buffer_[192] = {};
+        size_t used_ = 0;
+};
+
+bool hasValidUnixTime()
+{
+    return time(nullptr) >= MIN_VALID_UNIX_TIME;
+}
+
+bool hasHomeNetworkConfiguration()
+{
+    // A valid web configuration is the normal case. Keep compatibility with
+    // older installations that rely only on credentials persisted by the
+    // ESP8266 SDK and are already connected.
+    return wifiConfigurationLoaded || WiFi.status() == WL_CONNECTED;
+}
+
+bool isSuplaProvisioningOpen()
+{
+    return suplaProvisioningDeadlineMs != 0 &&
+           static_cast<int32_t>(suplaProvisioningDeadlineMs - millis()) > 0;
+}
+
+uint32_t suplaProvisioningSecondsRemaining()
+{
+    if(!isSuplaProvisioningOpen()) return 0;
+    return (suplaProvisioningDeadlineMs - millis() + 999UL) / 1000UL;
+}
+
+void openSuplaProvisioningWindow()
+{
+    // Saving SUPLA before the home-network credentials must not turn an
+    // unfinished first-time setup into a two-minute recovery session.
+    const uint32_t duration =
+        supla_info->configured && wifiConfigurationLoaded
+        ? SUPLA_RECOVERY_WINDOW_MS
+        : SUPLA_FIRST_CLAIM_WINDOW_MS;
+    suplaProvisioningDeadlineMs = millis() + duration;
+}
+
+bool requestArrivedViaSoftAp()
+{
+    if(server == nullptr || (WiFi.getMode() & WIFI_AP) == 0) return false;
+    const IPAddress softApAddress = WiFi.softAPIP();
+
+    // The accepted socket normally identifies the ingress interface by its
+    // local address. Fail closed if the home network assigned the station
+    // exactly the same address as the setup AP: in that rare case a LAN
+    // request cannot be distinguished safely from an AP request.
+    if(WiFi.status() == WL_CONNECTED && WiFi.localIP() == softApAddress)
+        return false;
+
+    return server->client().localIP() == softApAddress;
+}
+
+bool isSuplaConfigurationUnlocked()
+{
+    return isSuplaProvisioningOpen() && requestArrivedViaSoftAp();
+}
+
+void scheduleDeviceRestart(bool closeProvisioningWindow)
+{
+    // Restart outside the HTTP callback so ESP8266WebServer is not deleted
+    // while it is still unwinding the request handler.
+    if(closeProvisioningWindow)
+    {
+        suplaProvisioningDeadlineMs = 0;
+        memset(suplaCsrfToken, 0, sizeof(suplaCsrfToken));
+    }
+    deviceRestartDeadlineMs = millis() + 1500UL;
+}
+
+bool isProtectedStoragePath(String path)
+{
+    path.trim();
+    path.replace('\\', '/');
+    path.toLowerCase();
+
+    const int queryStart = path.indexOf('?');
+    if (queryStart >= 0)
+        path.remove(queryStart);
+    const int fragmentStart = path.indexOf('#');
+    if (fragmentStart >= 0)
+        path.remove(fragmentStart);
+
+    if (!path.startsWith(F("/")))
+        path = String(F("/")) + path;
+    while (path.indexOf(F("//")) >= 0)
+        path.replace(F("//"), F("/"));
+
+    // Reject traversal and ambiguous dot segments instead of trying to
+    // reproduce LittleFS path normalization in the HTTP layer.
+    if (path == F("/..") || path.startsWith(F("/../")) ||
+        path.endsWith(F("/..")) || path.indexOf(F("/../")) >= 0 ||
+        path == F("/.") || path.startsWith(F("/./")) ||
+        path.endsWith(F("/.")) || path.indexOf(F("/./")) >= 0)
+        return true;
+
+    // The file server transparently prefers .gz variants. Protect those under
+    // the same policy as their uncompressed counterparts.
+    while (path.endsWith(F(".gz")))
+        path.remove(path.length() - 3);
+
+    // These diagnostic files can contain raw stack bytes or command/state
+    // history.  In particular, a post-mortem stack dump may include copies of
+    // EEPROM-backed credentials, so never expose them through the generic
+    // file browser.
+    if (path == F("/mqtt.json") || path == F("/wifi.json") ||
+        path == F("/crashlog.txt") || path == F("/debugoutput.txt") ||
+        path == F("/debug.txt") || path == F("/log.txt") ||
+        path == F("/bootlog.txt"))
+        return true;
+
+    return path.startsWith(F("/supla-dev.")) ||
+           path == F("/supla") || path.startsWith(F("/supla/"));
+}
+
+bool isProtectedMutationPath(String path)
+{
+    // Credentials/runtime storage is neither readable nor mutable through the
+    // generic file manager.  Web assets remain readable, but are immutable so
+    // a LAN client cannot plant same-origin JavaScript which later steals the
+    // short-lived provisioning token when the owner uses the setup AP.
+    if(isProtectedStoragePath(path)) return true;
+
+    path.trim();
+    path.replace('\\', '/');
+    path.toLowerCase();
+    const int queryStart = path.indexOf('?');
+    if(queryStart >= 0) path.remove(queryStart);
+    const int fragmentStart = path.indexOf('#');
+    if(fragmentStart >= 0) path.remove(fragmentStart);
+    if(!path.startsWith(F("/"))) path = String(F("/")) + path;
+    while(path.indexOf(F("//")) >= 0) path.replace(F("//"), F("/"));
+    while(path.endsWith(F(".gz"))) path.remove(path.length() - 3);
+
+    if(path.endsWith(F(".html")) || path.endsWith(F(".htm")) ||
+       path.endsWith(F(".js")) || path.endsWith(F(".css")))
+        return true;
+
+    // Translation values are inserted with innerHTML by the legacy i18n code,
+    // so they are executable web content for integrity purposes.
+    if(path.startsWith(F("/langue_")) && path.endsWith(F(".txt")))
+        return true;
+
+    return path == F("/manifest.json") || path == F("/filelist.txt");
+}
+
+uint32_t suplaConfigChecksum(const sSupla_info_eeprom_t &config)
+{
+    // FNV-1a over the versioned payload (everything before checksum).
+    const uint8_t *bytes = reinterpret_cast<const uint8_t *>(&config);
+    uint32_t hash = 2166136261UL;
+    for (size_t i = 0; i < offsetof(sSupla_info_eeprom_t, checksum); ++i)
+    {
+        hash ^= bytes[i];
+        hash *= 16777619UL;
+    }
+    return hash;
+}
+
+bool isAllZero(const uint8_t *value, size_t length)
+{
+    uint8_t aggregate = 0;
+    for (size_t i = 0; i < length; ++i)
+        aggregate |= value[i];
+    return aggregate == 0;
+}
+
+void ensureSuplaCsrfToken()
+{
+    if (suplaCsrfToken[0] != '\0')
+        return;
+
+    uint8_t randomBytes[SUPLA_CSRF_TOKEN_BYTES] = {};
+    do
+    {
+        os_get_random(randomBytes, sizeof(randomBytes));
+    } while (isAllZero(randomBytes, sizeof(randomBytes)));
+
+    static const char HEX_DIGITS[] = "0123456789abcdef";
+    for (size_t i = 0; i < sizeof(randomBytes); ++i)
+    {
+        suplaCsrfToken[i * 2] = HEX_DIGITS[randomBytes[i] >> 4];
+        suplaCsrfToken[i * 2 + 1] = HEX_DIGITS[randomBytes[i] & 0x0F];
+    }
+}
+
+bool isValidSuplaCsrfToken(const char *provided)
+{
+    ensureSuplaCsrfToken();
+    if (provided == nullptr || strlen(provided) != sizeof(suplaCsrfToken) - 1)
+        return false;
+
+    uint8_t difference = 0;
+    for (size_t i = 0; i < sizeof(suplaCsrfToken) - 1; ++i)
+        difference |= static_cast<uint8_t>(provided[i] ^ suplaCsrfToken[i]);
+    return difference == 0;
+}
+
+void generateSuplaIdentity(sSupla_info &config)
+{
+    do
+    {
+        os_get_random(config.guid, sizeof(config.guid));
+    } while (isAllZero(config.guid, sizeof(config.guid)));
+
+    do
+    {
+        os_get_random(config.authKey, sizeof(config.authKey));
+    } while (isAllZero(config.authKey, sizeof(config.authKey)));
+}
+
+bool hasJsonContentType()
+{
+    String contentType = server->header(F("Content-Type"));
+    contentType.trim();
+    const int parameterStart = contentType.indexOf(';');
+    if (parameterStart >= 0)
+    {
+        contentType.remove(parameterStart);
+        contentType.trim();
+    }
+    return contentType.equalsIgnoreCase(F("application/json"));
+}
+
+bool hasExclusivePlainBody()
+{
+    // ESP8266WebServer keeps the raw body in a synthetic "plain" argument,
+    // but (despite arg()/argName() exposing it) does not include that synthetic
+    // entry in args() on ESP8266 Arduino core 3.1.2. Requiring zero regular
+    // arguments prevents a query/form value from shadowing the JSON body.
+    return server->args() == 0 && server->hasArg(F("plain")) &&
+           server->argName(0) == F("plain");
+}
+
+bool isValidSuplaEmail(const String &email)
+{
+    const int at = email.indexOf('@');
+    if (email.length() < 3 || at <= 0 || at >= static_cast<int>(email.length()) - 1 ||
+        email.indexOf('@', at + 1) >= 0)
+        return false;
+    for (size_t i = 0; i < email.length(); ++i)
+    {
+        const char c = email[i];
+        if (c <= ' ' || c == '/' || c == '\\')
+            return false;
+    }
+    return true;
+}
+
+bool isValidSuplaServer(const String &serverName)
+{
+    if (serverName.isEmpty())
+        return true; // SUPLA Cloud autodiscovery based on the account e-mail.
+    if (serverName[0] == '.' || serverName[0] == '-' ||
+        serverName[serverName.length() - 1] == '.' || serverName[serverName.length() - 1] == '-')
+        return false;
+    for (size_t i = 0; i < serverName.length(); ++i)
+    {
+        const char c = serverName[i];
+        const bool valid = (c >= 'a' && c <= 'z') ||
+                           (c >= 'A' && c <= 'Z') ||
+                           (c >= '0' && c <= '9') || c == '.' || c == '-';
+        if (!valid)
+            return false;
+        if (c == '.' &&
+            ((i > 0 && (serverName[i - 1] == '.' || serverName[i - 1] == '-')) ||
+             (i + 1 < serverName.length() && serverName[i + 1] == '-')))
+            return false;
+    }
+    return true;
+}
+
+void removeSuplaRuntimeConfig()
+{
+    LittleFS.remove(F("/supla-dev.cfg"));
+    LittleFS.remove(F("/supla-dev.bak"));
+    LittleFS.remove(F("/supla-dev.tmp"));
+
+    Dir directory = LittleFS.openDir(F("/supla"));
+    while (directory.next())
+    {
+        String path = directory.fileName();
+        if (!path.startsWith("/"))
+            path = String(F("/supla/")) + path;
+        LittleFS.remove(path);
+        BWC_YIELD;
+    }
+}
+
+const char *currentSuplaStatus()
+{
+    if(supla_info == nullptr || !supla_info->enabled)
+        return "disabled";
+    if(!supla_info->configured)
+        return "not-configured";
+    if(suplaBridge == nullptr)
+        return "not-running";
+    if(WiFi.status() != WL_CONNECTED)
+        return "waiting-for-wifi";
+    if(!hasValidUnixTime())
+        return "waiting-for-time";
+    return suplaBridge->status();
+}
+
+bool isFactoryAssetPath(String path)
+{
+    path.replace('\\', '/');
+    while(path.startsWith(F("/"))) path.remove(0, 1);
+
+    File manifest = LittleFS.open(F("/filelist.txt"), "r");
+    if(!manifest) return false;
+
+    while(manifest.available())
+    {
+        String entry = manifest.readStringUntil('\n');
+        entry.trim();
+        entry.replace('\\', '/');
+        while(entry.startsWith(F("/"))) entry.remove(0, 1);
+        if(entry == path)
+        {
+            manifest.close();
+            return true;
+        }
+        BWC_YIELD;
+    }
+    manifest.close();
+    return false;
+}
+
+void removeKnownMutableLittleFsFiles()
+{
+    static const char *const paths[] = {
+        "/settings.json",
+        "/states.txt",
+        "/cmdq.json",
+        "/cmdq.backup",
+        "/webconfig.json",
+        "/wifi.json",
+        "/mqtt.json",
+        "/hwcfg.json",
+        "/crashlog.txt",
+        "/debugoutput.txt",
+        "/debug.txt",
+        "/log.txt",
+        "/bootlog.txt"
+    };
+    for(const char *path : paths)
+    {
+        LittleFS.remove(path);
+        BWC_YIELD;
+    }
+    removeSuplaRuntimeConfig();
+}
+
+void removeNonFactoryLittleFsFiles()
+{
+    removeKnownMutableLittleFsFiles();
+
+    // The build-generated manifest is the authoritative list of files that
+    // belong to the installed web UI and bundled assets. Remove everything
+    // else, including files created by the former generic file manager and
+    // user-named command-queue backups. If an old image has no manifest, the
+    // known mutable files above are still erased without risking the web UI.
+    if(!LittleFS.exists(F("/filelist.txt"))) return;
+
+    // Removing while iterating may make the directory cursor skip an entry on
+    // some LittleFS releases. Repeat a bounded number of passes until stable.
+    for(uint8_t pass = 0; pass < 4; ++pass)
+    {
+        bool removedAny = false;
+        Dir root = LittleFS.openDir("/");
+        while(root.next())
+        {
+            String path = root.fileName();
+            if(!path.startsWith(F("/"))) path = String(F("/")) + path;
+            if(path == F("/filelist.txt") || isFactoryAssetPath(path))
+                continue;
+            if(LittleFS.remove(path)) removedAny = true;
+            BWC_YIELD;
+        }
+        if(!removedAny) break;
+    }
+}
+
+bool erasePersistentConfiguration()
+{
+    EEPROM.begin(EEPROM_CONFIG_SIZE);
+    for(size_t i = 0; i < EEPROM_CONFIG_SIZE; ++i)
+        EEPROM.write(i, 0xff);
+    const bool saved = EEPROM.commit();
+    EEPROM.end();
+    return saved;
+}
+
+void performFactoryReset()
+{
+    // Stop every writer before deleting runtime files. Otherwise the normal
+    // loop could recreate settings.json or states.txt between deletion and
+    // restart.
+    stopall();
+
+    if(LittleFS.begin())
+    {
+        removeNonFactoryLittleFsFiles();
+        LittleFS.end();
+    }
+
+    if(!erasePersistentConfiguration())
+    {
+        delay(100);
+        erasePersistentConfiguration();
+    }
+
+    uint32_t marker = 0;
+    ESP.rtcUserMemoryWrite(POST_FS_RESTART_RTC_OFFSET, &marker, sizeof(marker));
+#if defined(ESP8266)
+    ESP.eraseConfig();
+#endif
+    delay(250);
+    ESP.restart();
+}
+
+uint32_t maxFirmwareUpdateSize()
+{
+    const uint32_t freeSpace = ESP.getFreeSketchSpace();
+    if(freeSpace <= 0x1000UL) return 0;
+    return (freeSpace - 0x1000UL) & 0xFFFFF000UL;
+}
+
+uint32_t filesystemUpdateSize()
+{
+    return FS_PHYS_SIZE;
+}
+
+const __FlashStringHelper *webUpdateTargetName(WebUpdateTarget target)
+{
+    return target == WebUpdateTarget::FILESYSTEM ? F("filesystem") : F("firmware");
+}
+
+void resetWebUpdateState(WebUpdateTarget target)
+{
+    webUpdateState = WebUpdateState{};
+    webUpdateState.target = target;
+}
+
+void setWebUpdateError(const String &message)
+{
+    if(webUpdateState.error[0] == '\0')
+        strlcpy(webUpdateState.error, message.c_str(), sizeof(webUpdateState.error));
+}
+
+bool parseWebUpdateSize(const String &header, uint32_t &result)
+{
+    if(header.isEmpty() || header.length() > 10) return false;
+
+    uint32_t value = 0;
+    for(size_t i = 0; i < header.length(); ++i)
+    {
+        const char c = header[i];
+        if(c < '0' || c > '9') return false;
+        const uint8_t digit = static_cast<uint8_t>(c - '0');
+        if(value > (UINT32_MAX - digit) / 10UL) return false;
+        value = value * 10UL + digit;
+    }
+    if(value == 0) return false;
+    result = value;
+    return true;
+}
+
+void loadPostFilesystemRestartMarker()
+{
+    uint32_t marker = 0;
+    if(ESP.rtcUserMemoryRead(POST_FS_RESTART_RTC_OFFSET, &marker, sizeof(marker)) &&
+       marker == POST_FS_RESTART_MAGIC)
+    {
+        postFilesystemRestartPending = true;
+        postFilesystemRestartEarliestMs = millis() + POST_FS_RESTART_DELAY_MS;
+        marker = 0;
+        ESP.rtcUserMemoryWrite(POST_FS_RESTART_RTC_OFFSET, &marker, sizeof(marker));
+    }
+}
+
+void markPostFilesystemRestart()
+{
+    uint32_t marker = POST_FS_RESTART_MAGIC;
+    ESP.rtcUserMemoryWrite(POST_FS_RESTART_RTC_OFFSET, &marker, sizeof(marker));
+}
+
+void prepareWebUpdate(WebUpdateTarget target)
+{
+    webUpdateInProgress = true;
+    webUpdateLastActivityMs = millis();
+
+    // Free network buffers and prevent background clients from competing with
+    // the HTTP upload. The SPA bridge itself remains alive and bwc->loop() is
+    // called for every upload chunk so communication with the pump continues.
+    if(suplaBridge) suplaBridge->stop();
+    if(mqttClient) mqttClient->disconnect();
+    if(webSocket) webSocket->disconnect();
+    if(updateMqttTimer) updateMqttTimer->detach();
+    if(updateWSTimer) updateWSTimer->detach();
+    // The update page and endpoints live in firmware, so a failed or
+    // interrupted LittleFS write remains recoverable without USB. The ESP8266
+    // core 3.1.2 ATOMIC_FS_UPDATE boot path incorrectly tries to execute the
+    // copied filesystem as an application; write web storage directly only
+    // after every filesystem user has been stopped.
+    if(target == WebUpdateTarget::FILESYSTEM)
+        close_all_fs();
+    ESP.wdtFeed();
+}
+
+void handleWebUpdatePage()
+{
+    server->sendHeader(F("Cache-Control"), F("no-store"));
+    server->send_P(200, PSTR("text/html; charset=utf-8"), WEB_UPDATE_PAGE);
+}
+
+void handleWebUpdateStatus()
+{
+    StaticJsonDocument<256> doc;
+    doc[F("firmware")] = FW_VERSION;
+    doc[F("minFirmwareBytes")] = MIN_FIRMWARE_UPDATE_BYTES;
+    doc[F("maxFirmwareBytes")] = maxFirmwareUpdateSize();
+    doc[F("filesystemBytes")] = filesystemUpdateSize();
+    doc[F("freeHeap")] = ESP.getFreeHeap();
+    doc[F("uptimeSeconds")] = millis() / 1000UL;
+    doc[F("postFilesystemRestartPending")] = postFilesystemRestartPending;
+    doc[F("updateInProgress")] = webUpdateInProgress;
+
+    String json;
+    json.reserve(256);
+    if(serializeJson(doc, json) == 0)
+    {
+        server->send(500, F("application/json"), F("{\"error\":\"serialization\"}"));
+        return;
+    }
+    server->sendHeader(F("Cache-Control"), F("no-store"));
+    server->send(200, F("application/json"), json);
+}
+
+void handleWebUpdateUpload(WebUpdateTarget target)
+{
+    HTTPUpload &upload = server->upload();
+
+    if(upload.status == UPLOAD_FILE_START)
+    {
+        resetWebUpdateState(target);
+        if(webUpdateInProgress || Update.isRunning())
+        {
+            setWebUpdateError(F("Inna aktualizacja jest już w toku."));
+            return;
+        }
+
+        String filename = upload.filename;
+        filename.toLowerCase();
+        if(!filename.endsWith(F(".bin")))
+        {
+            setWebUpdateError(F("Plik aktualizacji musi mieć rozszerzenie .bin."));
+            return;
+        }
+
+        uint32_t expectedSize = 0;
+        if(!parseWebUpdateSize(server->header(F("X-Update-Size")), expectedSize))
+        {
+            setWebUpdateError(F("Brak prawidłowego nagłówka rozmiaru pliku."));
+            return;
+        }
+        webUpdateState.expectedSize = expectedSize;
+
+        if(target == WebUpdateTarget::FILESYSTEM)
+        {
+            if(expectedSize != filesystemUpdateSize())
+            {
+                setWebUpdateError(String(F("Nieprawidłowy rozmiar obrazu LittleFS. Oczekiwano ")) +
+                                  filesystemUpdateSize() + F(" bajtów."));
+                return;
+            }
+        }
+        else if(expectedSize < MIN_FIRMWARE_UPDATE_BYTES ||
+                expectedSize > maxFirmwareUpdateSize())
+        {
+            setWebUpdateError(F("Rozmiar firmware jest poza dozwolonym zakresem."));
+            return;
+        }
+
+        prepareWebUpdate(target);
+        Update.runAsync(false);
+        if(!Update.begin(expectedSize,
+                         target == WebUpdateTarget::FILESYSTEM ? U_FS : U_FLASH))
+        {
+            setWebUpdateError(String(F("Nie można rozpocząć zapisu: ")) + Update.getErrorString());
+            return;
+        }
+        webUpdateState.started = true;
+        BWC_LOG_P(PSTR("Web update > %s start, %u bytes\n"),
+                  String(webUpdateTargetName(target)).c_str(), expectedSize);
+        return;
+    }
+
+    if(webUpdateState.target != target ||
+       webUpdateState.error[0] != '\0')
+        return;
+
+    if(upload.status == UPLOAD_FILE_WRITE)
+    {
+        if(!webUpdateState.started ||
+           upload.currentSize > webUpdateState.expectedSize - webUpdateState.receivedSize)
+        {
+            setWebUpdateError(F("Odebrano więcej danych niż zadeklarowano."));
+            if(Update.isRunning()) Update.end(false);
+            return;
+        }
+
+        // A full LittleFS image generated by mklittlefs carries its on-disk
+        // magic in the first block. Size alone is not enough to distinguish a
+        // random 1,024,000-byte file from a usable filesystem image.
+        if(target == WebUpdateTarget::FILESYSTEM &&
+           webUpdateState.receivedSize == 0 &&
+           (upload.currentSize < 16 || memcmp(upload.buf + 8, "littlefs", 8) != 0))
+        {
+            setWebUpdateError(F("Plik nie jest prawidłowym obrazem LittleFS."));
+            if(Update.isRunning()) Update.end(false);
+            return;
+        }
+
+        // ESP8266WebServer consumes the multipart request synchronously. Keep
+        // forwarding CIO/DSP traffic between flash chunks instead of leaving
+        // the connected pump unattended for the duration of the upload.
+        if(bwc) bwc->loop();
+        const size_t written = Update.write(upload.buf, upload.currentSize);
+        if(written != upload.currentSize)
+        {
+            setWebUpdateError(String(F("Błąd zapisu pamięci flash: ")) + Update.getErrorString());
+            if(Update.isRunning()) Update.end(false);
+            return;
+        }
+        webUpdateState.receivedSize += written;
+        webUpdateLastActivityMs = millis();
+        if(bwc) bwc->loop();
+        ESP.wdtFeed();
+        BWC_YIELD;
+        return;
+    }
+
+    if(upload.status == UPLOAD_FILE_END)
+    {
+        webUpdateLastActivityMs = millis();
+        if(!webUpdateState.started ||
+           webUpdateState.receivedSize != webUpdateState.expectedSize ||
+           upload.totalSize != webUpdateState.expectedSize)
+        {
+            setWebUpdateError(F("Plik jest niekompletny lub ma inny rozmiar niż zadeklarowany."));
+            if(Update.isRunning()) Update.end(false);
+            return;
+        }
+        if(!Update.end(false))
+        {
+            setWebUpdateError(String(F("Nie udało się zakończyć aktualizacji: ")) +
+                              Update.getErrorString());
+            return;
+        }
+        webUpdateState.finished = true;
+        webUpdateState.success = true;
+        if(target == WebUpdateTarget::FILESYSTEM)
+            markPostFilesystemRestart();
+        BWC_LOG_P(PSTR("Web update > %s verified, %u bytes\n"),
+                  String(webUpdateTargetName(target)).c_str(), webUpdateState.receivedSize);
+        return;
+    }
+
+    if(upload.status == UPLOAD_FILE_ABORTED)
+    {
+        if(Update.isRunning()) Update.end(false);
+        setWebUpdateError(F("Wysyłanie pliku zostało przerwane."));
+        if(webUpdateInProgress)
+            scheduleDeviceRestart(true);
+    }
+}
+
+void handleWebUpdateResult(WebUpdateTarget target)
+{
+    server->sendHeader(F("Cache-Control"), F("no-store"));
+    if(webUpdateState.target != target)
+    {
+        server->send(409, F("application/json"),
+                     F("{\"ok\":false,\"error\":\"Niezgodny typ aktualizacji.\"}"));
+        return;
+    }
+
+    StaticJsonDocument<256> doc;
+    doc[F("ok")] = webUpdateState.success;
+    doc[F("target")] = webUpdateTargetName(target);
+    doc[F("bytes")] = webUpdateState.receivedSize;
+    if(!webUpdateState.success)
+        doc[F("error")] = webUpdateState.error[0] != '\0'
+                           ? webUpdateState.error
+                           : "Aktualizacja nie została zakończona.";
+
+    String json;
+    json.reserve(256);
+    serializeJson(doc, json);
+    // ESP8266WebServer may keep the upload connection alive. Disable Nagle and
+    // wait for this small result to leave the TCP buffer before scheduling the
+    // reboot, otherwise the browser can report a false network error although
+    // the image was already committed successfully.
+    server->client().setNoDelay(true);
+    server->send(webUpdateState.success ? 200 : 400, F("application/json"), json);
+    server->client().flush(1000);
+
+    // A restart applies a successful image and also restores every background
+    // service cleanly after a failed flash operation. Rejections that happened
+    // before prepareWebUpdate() do not interrupt the running device.
+    if(webUpdateInProgress)
+        scheduleDeviceRestart(true);
+}
+} // namespace
 
 // Setup a oneWire instance to communicate with any OneWire devices
 // Setting arbitrarily to 231 since this isn't an actual pin
@@ -16,6 +860,7 @@ DallasTemperature *tempSensors;
 WiFiEventHandler gotIpEventHandler, disconnectedEventHandler;
 void cb_gotIP(const WiFiEventStationModeGotIP &event)
 {
+    ++wifiGotIpCount;
     gotIP_flag = true;
 }
 
@@ -24,9 +869,18 @@ void gotIP()
     ESP.wdtFeed();
     BWC_LOG_P(PSTR("start of gotip millis = %d\n"), millis());
     gotIP_flag = false;
-    WiFi.softAPdisconnect();
-    WiFi.mode(WIFI_STA);
-    BWC_LOG_P(PSTR("Soft AP > closed\n"), 0);
+    if(isSuplaProvisioningOpen() && (WiFi.getMode() & WIFI_AP) != 0)
+    {
+        WiFi.mode(WIFI_AP_STA);
+        BWC_LOG_P(PSTR("Soft AP > provisioning window remains open for %d s\n"),
+                  suplaProvisioningSecondsRemaining());
+    }
+    else
+    {
+        WiFi.softAPdisconnect();
+        WiFi.mode(WIFI_STA);
+        BWC_LOG_P(PSTR("Soft AP > closed\n"), 0);
+    }
     BWC_LOG_P(PSTR("Connected as station with localIP: %s\n"), WiFi.localIP().toString().c_str());
     startNTP();
     BWC_LOG_P(PSTR("end of gotip millis = %d\n"), millis());
@@ -38,6 +892,9 @@ void gotIP()
 
 void cb_disconnected(const WiFiEventStationModeDisconnected &event)
 {
+    ++wifiDisconnectCount;
+    wifiLastDisconnectMillis = millis();
+    wifiLastDisconnectReason = event.reason;
     disconnected_flag = true;
     // startSoftAp();
 }
@@ -50,6 +907,7 @@ void setup()
     stack_start = &stack;
 
     Serial.begin(76800);
+    loadPostFilesystemRestartMarker();
     BWC_LOG_P(PSTR("\nSetup > Start @ millis: %d\n"), millis());
     /*register wifi events */
     gotIpEventHandler = WiFi.onStationModeGotIP(cb_gotIP);
@@ -77,26 +935,34 @@ void setup()
         mqtt_info->mqttTelemetryInterval = MQTT_TELEMETRY_INTERVAL;
         mqtt_info->mqttUsername = MQTT_USER_F;
         mqtt_info->useMqtt = MQTT_USEMQTT;
+        supla_info = new sSupla_info;
         wifi_info = new sWifi_info{.enableWmApFallback = true};
     }
     bwc->setup();
     bwc->loop();
     periodicTimer->attach(periodicTimerInterval, []
                           { periodicTimerFlag = true; });
-    // delayed mqtt start
-    startComplete_ticker->attach(30, []
-                                 { bwc->restoreStates(); startComplete_ticker->detach(); delete startComplete_ticker; }); // can it destroy itself?
+    // A Ticker callback must not delete its own Ticker or perform filesystem
+    // work. Signal the cooperative loop and restore the SPA state there.
+    startComplete_ticker->once(30, []
+                               { restoreStatesFlag = true; });
     // update webpage every WS_PERIOD seconds. (will also be updated on state changes)
     updateWSTimer->attach(WS_PERIOD, []
                           { sendWSFlag = true; });
     loadWebConfig();
+    loadSupla();
+    loadWifi();
+    openSuplaProvisioningWindow();
     startWiFi();
-    if (wifi_info->enableWmApFallback)
-        startSoftAp(); // not blocking anymore so no use case should exist for this to be turned off.
+    // An unclaimed device must expose its initial setup AP.  Once claimed,
+    // honour the user's recovery-AP preference; the window is always bounded.
+    if (!supla_info->configured || wifi_info->enableWmApFallback)
+        startSoftAp();
     startHttpServer();
     startWebSocket();
     startOTA();
     startMqtt();
+    startSupla();
     if (bwc->hasTempSensor)
     {
         HeapSelectIram ephemeral;
@@ -117,23 +983,68 @@ void loop()
 
     if (gotIP_flag)
         gotIP();
+    if(restoreStatesFlag)
+    {
+        restoreStatesFlag = false;
+        bwc->restoreStates();
+    }
     if (disconnected_flag)
-        startSoftAp();
+    {
+        disconnected_flag = false;
+        if(isSuplaProvisioningOpen() &&
+           (!supla_info->configured || wifi_info->enableWmApFallback))
+            startSoftAp();
+        // Starting the recovery AP changes only the Wi-Fi mode; it does not
+        // restart a station association that the SDK has abandoned.
+        wifi_manual_reconnect();
+    }
+
+    if(suplaProvisioningDeadlineMs != 0 && !isSuplaProvisioningOpen())
+    {
+        suplaProvisioningDeadlineMs = 0;
+        if((WiFi.getMode() & WIFI_AP) != 0)
+        {
+            WiFi.softAPdisconnect();
+            WiFi.mode(WIFI_STA);
+            BWC_LOG_P(PSTR("Soft AP > provisioning window expired\n"), 0);
+        }
+    }
     // We need this self-destructing info several times, so save it on the stack
     bool newData = bwc->newData();
     // Fiddle with the pump computer
     bwc->loop();
 
-    // listen for webserver events
+    // Give local control and recovery traffic priority while SUPLA is
+    // downloading channel configuration after a fresh LittleFS image.
     if (server)
-    {
         server->handleClient();
-        // Serial.print(".");
+
+    if (suplaBridge && !webUpdateInProgress)
+    {
+        // SuplaDevice's ESP8266 TLS client waits indefinitely for a valid
+        // system clock before certificate validation. Keep the SPA, web UI and
+        // OTA responsive while Wi-Fi/NTP are unavailable.
+        if (WiFi.status() == WL_CONNECTED && hasValidUnixTime())
+            suplaBridge->iterate();
+        static uint32_t lastSuplaSyncMs = 0;
+        if (newData || millis() - lastSuplaSyncMs >= 10000UL)
+        {
+            SpaSnapshot snapshot;
+            if (bwc->getSnapshot(snapshot))
+            {
+                suplaBridge->sync(snapshot, lastSuplaSyncMs == 0);
+                lastSuplaSyncMs = millis();
+            }
+        }
     }
+
     // listen for OTA events
-    ArduinoOTA.handle();
+    if(!webUpdateInProgress)
+        ArduinoOTA.handle();
     // web socket
-    if (newData || sendWSFlag)
+    if (webSocket && !webUpdateInProgress)
+        webSocket->loop();
+    if (!webUpdateInProgress && (newData || sendWSFlag))
     {
         sendWSFlag = false;
         sendWS();
@@ -144,7 +1055,7 @@ void loop()
     {
 
         // MQTT
-        if (mqtt_info->useMqtt && mqttClient->loop())
+        if (!webUpdateInProgress && mqtt_info->useMqtt && mqttClient->loop())
         {
             String msg;
             msg.reserve(32);
@@ -178,11 +1089,17 @@ void loop()
     if (periodicTimerFlag)
     {
         periodicTimerFlag = false;
-        if (WiFi.getMode() == WIFI_AP_STA)
+        // The disconnect event normally retries immediately. This independent
+        // 60-second safety net also recovers if the SDK ever loses that event
+        // or abandons an association attempt during a longer router outage.
+        // Never call WiFi.begin() while connected: doing that tears down a
+        // healthy station link and needlessly disconnects SUPLA.
+        if (WiFi.status() != WL_CONNECTED)
         {
             wifi_manual_reconnect();
         }
-        if (mqtt_info->useMqtt && !mqttClient->loop() && (WiFi.status() == WL_CONNECTED))
+        if (!webUpdateInProgress && mqtt_info->useMqtt && !mqttClient->loop() &&
+            (WiFi.status() == WL_CONNECTED))
         {
             BWC_LOG_P(PSTR("MQTT > Not connected\n"), 0);
             mqttConnect();
@@ -199,6 +1116,43 @@ void loop()
         ESP.reset();
         delay(3000);
     }
+
+    if(deviceRestartDeadlineMs != 0 &&
+       static_cast<int32_t>(millis() - deviceRestartDeadlineMs) >= 0)
+    {
+        deviceRestartDeadlineMs = 0;
+        if(factoryResetRequested)
+        {
+            factoryResetRequested = false;
+            performFactoryReset();
+            return;
+        }
+        stopall();
+        delay(100);
+        ESP.restart();
+    }
+
+    if(postFilesystemRestartPending && deviceRestartDeadlineMs == 0 &&
+       static_cast<int32_t>(millis() - postFilesystemRestartEarliestMs) >= 0)
+    {
+        // The first boot recreates SUPLA's LittleFS runtime/channel cache. A
+        // single clean restart then releases temporary TLS/config allocations
+        // and starts the long-running process with a compact heap.
+        postFilesystemRestartPending = false;
+        scheduleDeviceRestart(true);
+    }
+
+    // A browser can disappear mid-request (sleep, roaming, closed tab). If the
+    // HTTP stack does not reach its final callback, leave update mode and
+    // restore all services automatically instead of waiting forever.
+    if(webUpdateInProgress && deviceRestartDeadlineMs == 0 &&
+       webUpdateLastActivityMs != 0 &&
+       millis() - webUpdateLastActivityMs >= WEB_UPDATE_STALL_TIMEOUT_MS)
+    {
+        BWC_LOG_P(PSTR("Web update > stalled; restarting\n"), 0);
+        scheduleDeviceRestart(true);
+    }
+
 }
 
 /**
@@ -214,7 +1168,7 @@ void sendWS()
     // Serial.printf("IRamheap %d\n", ESP.getFreeHeap());
     // send states
     String json;
-    json.reserve(384);
+    json.reserve(512);
 
     bwc->getJSONStates(json);
     webSocket->broadcastTXT(json);
@@ -238,11 +1192,11 @@ void sendWS()
 
 void getOtherInfo(String &rtn)
 {
-    // DynamicJsonDocument doc(512);
     StaticJsonDocument<512> doc;
     // Set the values in the document
     doc[F("CONTENT")] = F("OTHER");
     doc[F("MQTT")] = mqttClient->state();
+    doc[F("SUPLA")] = currentSuplaStatus();
     /*TODO: add these:*/
     //   doc[F("PressedButton")] = bwc->getPressedButton();
     doc[F("HASJETS")] = bwc->hasjets;
@@ -338,12 +1292,10 @@ void startWiFi()
     WiFi.persistent(true);
     WiFi.hostname(DEVICE_NAME_F);
     WiFi.mode(WIFI_STA); // WiFi.setOutputPower(15.0);
-    loadWifi();
-
     // RF tuning from wifi.json (web-UI editable, no rebuild needed).
     // Defaults: txPowerDbm=20.5 (max), noModemSleep=true, phyMode=auto.
     WiFi.setOutputPower(wifi_info->txPowerDbm);
-    WiFi.setSleep(wifi_info->noModemSleep ? WIFI_NONE_SLEEP : WIFI_MODEM_SLEEP);
+    WiFi.setSleepMode(wifi_info->noModemSleep ? WIFI_NONE_SLEEP : WIFI_MODEM_SLEEP);
     switch (wifi_info->phyMode)
     {
         case 1: WiFi.setPhyMode(WIFI_PHY_MODE_11B); break; // most robust on weak links
@@ -395,6 +1347,11 @@ void wifi_manual_reconnect()
 void startSoftAp()
 {
     disconnected_flag = false;
+    if(!isSuplaProvisioningOpen())
+    {
+        BWC_LOG_P(PSTR("Soft AP > provisioning window is closed\n"), 0);
+        return;
+    }
     if (WiFi.getMode() == WIFI_AP_STA)
     {
         BWC_LOG_P(PSTR("Soft AP IP: %s.\n"), WiFi.softAPIP().toString().c_str());
@@ -407,7 +1364,8 @@ void startSoftAp()
     IPAddress gateway(192, 168, 4, 1);
     IPAddress subnet(255, 255, 255, 0);
     BWC_LOG_P(PSTR("WiFi > soft-AP configuration: %s\n"), WiFi.softAPConfig(local_IP, gateway, subnet) ? "OK" : "Failed!");
-    BWC_LOG_P(PSTR("WiFi > soft AP mode: %s\n"), WiFi.softAP(WM_AP_NAME_F, WM_AP_PASSWORD_F) ? "OK" : "SoftAP fail");
+    BWC_LOG_P(PSTR("WiFi > soft AP mode: %s\n"),
+              WiFi.softAP(WM_AP_NAME_F, String(WM_AP_PASSWORD_F).c_str()) ? "OK" : "SoftAP fail");
     BWC_LOG_P(PSTR("WiFi > Soft AP IP: %s\n"), WiFi.softAPIP().toString().c_str());
     BWC_YIELD;
 }
@@ -421,7 +1379,7 @@ void checkNTP()
 {
     time_t now = time(nullptr);
     // static uint8_t ntpTryNumber = 0;
-    if (now < 57600)
+    if (!hasValidUnixTime())
     {
         // if (++ntpTryNumber == 10) {
         //     ntpTryNumber = 0; //reset until next check
@@ -463,9 +1421,8 @@ void startOTA()
 {
     BWC_LOG_P(PSTR("OTA > start\n"), 0);
     String dname = DEVICE_NAME_F;
-    String pw = OTA_PSWD_F;
     ArduinoOTA.setHostname(dname.c_str());
-    ArduinoOTA.setPassword(pw.c_str());
+    ArduinoOTA.setPassword(String(WM_AP_PASSWORD_F).c_str());
 
     ArduinoOTA.onStart([]()
                        {
@@ -495,9 +1452,13 @@ void startOTA()
 void stopall()
 {
     BWC_LOG_P(PSTR("Stop all > Free mem before stop: %d\n"), ESP.getFreeHeap());
+    if (suplaBridge)
+        suplaBridge->stop();
     bwc->stop();
     BWC_LOG_P(PSTR("MQTT > detaching\n"), 0);
     updateMqttTimer->detach();
+    if (startComplete_ticker && startComplete_ticker->active())
+        startComplete_ticker->detach();
     BWC_LOG_P(PSTR("Periodic timer > detaching\n"), 0);
     periodicTimer->detach();
     BWC_LOG_P(PSTR("WS > detaching\n"), 0);
@@ -568,7 +1529,9 @@ void startWebSocket()
     }
     webSocket = new WebSocketsServer(8080);
     webSocket->begin();
-    // webSocket->enableHeartbeat(11000, 5000, 2);
+    // Remove half-open browser sessions so their TCP buffers cannot accumulate
+    // across days of Wi-Fi roaming, laptop sleep and abrupt page closes.
+    webSocket->enableHeartbeat(15000, 3000, 2);
     webSocket->onEvent(webSocketEvent);
     // Serial.println(F("WebSocket > server started"));
 }
@@ -591,7 +1554,10 @@ void webSocketEvent(uint8_t num, WStype_t type, uint8_t *payload, size_t len)
     {
         // IPAddress ip = webSocket->remoteIP(num);
         // Serial.printf("WebSocket > [%u] Connected from %d.%d.%d.%d url: %s\r\n", num, ip[0], ip[1], ip[2], ip[3], payload);
-        sendWS();
+        // Defer the first snapshot until the connection callback has fully
+        // unwound and the client list is stable. Periodic updates use the same
+        // normal-loop path.
+        sendWSFlag = true;
     }
     break;
 
@@ -647,6 +1613,9 @@ void startHttpServer()
     {
         // HeapSelectIram ephemeral;
         server = new ESP8266WebServer(80);
+        // Content-Type is not retained by ESP8266WebServer unless explicitly
+        // collected. SUPLA's mutation endpoints require application/json.
+        server->collectHeaders("Content-Type", "X-Update-Size");
         /* if you want a simple auth you can do something like this for every page you want to "protect" */
         // server->on(F("/"), []() {
         //     if (!server->authenticate("user", "pswd")) {
@@ -667,16 +1636,24 @@ void startHttpServer()
         server->on(F("/resetwifi/"), handleResetWifi);
         server->on(F("/getmqtt/"), handleGetMqtt);
         server->on(F("/setmqtt/"), handleSetMqtt);
-        server->on(F("/dir/"), handleDir);
+        server->on(F("/getsupla/"), HTTP_GET, handleGetSupla);
+        server->on(F("/setsupla/"), HTTP_POST, handleSetSupla);
+        server->on(F("/resetsupla/"), HTTP_POST, handleResetSupla);
+        server->on(F("/factory-reset/"), HTTP_POST, handleFactoryReset);
         server->on(F("/hwtest/"), handleHWtest);
         server->on(F("/inputs/"), handleInputs);
-        server->on(F("/upload.html"), HTTP_POST, []()
-                   { server->send(200, F("text/plain"), ""); }, handleFileUpload);
-        server->on(F("/remove.html"), HTTP_POST, handleFileRemove);
-        server->on(F("/remove/"), HTTP_GET, handleFileRemove);
+        server->on(F("/update.html"), HTTP_GET, handleWebUpdatePage);
+        server->on(F("/update/status"), HTTP_GET, handleWebUpdateStatus);
+        server->on(F("/update/firmware"), HTTP_POST, []()
+                   { handleWebUpdateResult(WebUpdateTarget::FIRMWARE); }, []()
+                   { handleWebUpdateUpload(WebUpdateTarget::FIRMWARE); });
+        server->on(F("/update/filesystem"), HTTP_POST, []()
+                   { handleWebUpdateResult(WebUpdateTarget::FILESYSTEM); }, []()
+                   { handleWebUpdateUpload(WebUpdateTarget::FILESYSTEM); });
         server->on(F("/restart/"), handleRestart);
         server->on(F("/metrics"), handlePrometheusMetrics); // prometheus metrics
         server->on(F("/info/"), handleESPInfo);
+        server->on(F("/health/"), HTTP_GET, handleHealth);
         server->on(F("/sethardware/"), handleSetHardware);
         server->on(F("/gethardware/"), handleGetHardware);
         server->on(F("/debug-on/"), []()
@@ -702,14 +1679,12 @@ void handleGetHardware()
     // File file = LittleFS.open(F("hwcfg.json"), "r");
 
     sHW_config_eeprom_t hw_config_eeprom;
-    EEPROM.begin(sizeof(sWifi_info_eeprom_t) + sizeof(sMQTT_info_eeprom_t)+sizeof(sHW_config_eeprom_t));
-    EEPROM.get(sizeof(sWifi_info_eeprom_t) + sizeof(sMQTT_info_eeprom_t), hw_config_eeprom);
+    EEPROM.begin(EEPROM_CONFIG_SIZE);
+    EEPROM.get(HW_CONFIG_EEPROM_OFFSET, hw_config_eeprom);
     EEPROM.end();
-    if (*(uint32_t*)(hw_config_eeprom.tag) != 0x46435748) // "HWCF" in ascii (backwards)
+    if (!isValidHardwareConfig(hw_config_eeprom))
     {
-        // Serial.println(F("Failed to open hwcfg.json"));
-        server->send(404, F("text/plain"), F("not found"));
-        return;
+        hw_config_eeprom = makeDefaultHardwareConfig();
     }
 
     //json-ify the data for easier parsing on the client side (web UI)
@@ -764,16 +1739,24 @@ void handleSetHardware()
     // file.close();
     DynamicJsonDocument doc(512);
     DeserializationError error = deserializeJson(doc, message);
-    if (error)
+    if (error || !doc[F("cio")].is<int>() || !doc[F("dsp")].is<int>() ||
+        !doc[F("pcb")].is<const char*>() || !doc[F("pins")].is<JsonArray>())
     {
         server->send(400, F("text/plain"), "Invalid JSON");
         return;
     }
-    server->send(200, F("text/plain"), "ok");
+
     sHW_config_eeprom_t hw_config_eeprom;
+    const String pcbName = doc[F("pcb")].as<String>();
+    if(pcbName.isEmpty() || pcbName.length() >= sizeof(hw_config_eeprom.pcbname))
+    {
+        server->send(422, F("text/plain"), "Invalid PCB name");
+        return;
+    }
+
     hw_config_eeprom.cioNo = doc["cio"];
     hw_config_eeprom.dspNo = doc["dsp"];   
-    strcpy(hw_config_eeprom.pcbname, doc["pcb"].as<String>().c_str());
+    memcpy(hw_config_eeprom.pcbname, pcbName.c_str(), pcbName.length() + 1);
     hw_config_eeprom.hasTempSensor = doc["hasTempSensor"];
     for (int i = 0; i < 8; i++)
     {
@@ -787,10 +1770,22 @@ void handleSetHardware()
     hw_config_eeprom.power_levels.AIRPOWER = doc["pwr_levels"]["air"];
     hw_config_eeprom.power_levels.JETPOWER = doc["pwr_levels"]["jet"];
 
-    EEPROM.begin(sizeof(sWifi_info_eeprom_t) + sizeof(sMQTT_info_eeprom_t)+sizeof(sHW_config_eeprom_t));
-    EEPROM.put(sizeof(sWifi_info_eeprom_t) + sizeof(sMQTT_info_eeprom_t), hw_config_eeprom);
-    EEPROM.commit();
+    if(!isValidHardwareConfig(hw_config_eeprom))
+    {
+        server->send(422, F("text/plain"), "Invalid or conflicting hardware pinout");
+        return;
+    }
+
+    EEPROM.begin(EEPROM_CONFIG_SIZE);
+    EEPROM.put(HW_CONFIG_EEPROM_OFFSET, hw_config_eeprom);
+    const bool saved = EEPROM.commit();
     EEPROM.end();
+    if(!saved)
+    {
+        server->send(500, F("text/plain"), "EEPROM write failed");
+        return;
+    }
+    server->send(200, F("text/plain"), "ok");
     BWC_LOG_P(PSTR("HW config saved to EEPROM\n"), 0);
     BWC_YIELD;
 }
@@ -1020,13 +2015,14 @@ bool handleFileRead(String path)
     {
         path += F("index.html");
     }
-    // deny reading credentials
-    if (path.equalsIgnoreCase("/mqtt.json") || path.equalsIgnoreCase("/wifi.json"))
+    // Deny reading credentials and SUPLA runtime storage, whether or not the
+    // requested path currently exists.
+    if (isProtectedStoragePath(path))
     {
         server->send(403, F("text/plain"), F("Permission denied."));
         // Serial.println(F("HTTP > file reading denied (credentials)."));
         pause_all(false);
-        return false;
+        return true; // Request was handled; do not append a second 404 response.
     }
     String contentType = getContentType(path); // Get the MIME type
     String pathWithGz = path + ".gz";
@@ -1108,8 +2104,22 @@ void handleGetCommandQueue()
     if (!checkHttpPost(server->method()))
         return;
 
-    String json = bwc->getJSONCommandQueue();
-    server->send(200, F("application/json"), json);
+    // A full queue can exceed the largest contiguous DRAM block after TLS is
+    // connected. Count first, then stream through a small fixed buffer rather
+    // than constructing a second copy of the complete JSON document.
+    CountingPrint counter;
+    if(!bwc->writeJSONCommandQueue(counter))
+    {
+        server->send(500, F("application/json"), F("{\"error\":\"Failed to size command queue\"}"));
+        return;
+    }
+
+    server->setContentLength(counter.count());
+    server->send(200, F("application/json"), "");
+    BufferedPrint output(server->client());
+    const bool written = bwc->writeJSONCommandQueue(output);
+    if(!written || !output.finish())
+        BWC_LOG_P(PSTR("HTTP > failed to stream command queue\n"), 0);
 }
 
 /**
@@ -1221,50 +2231,89 @@ void handle_cmdq_file()
         return;
     }
 
+    if(!doc[F("ACT")].is<const char *>() || !doc[F("NAME")].is<const char *>())
+    {
+        server->send(400, F("text/plain"), F("Invalid command queue file request"));
+        return;
+    }
+
     String action = doc[F("ACT")].as<String>();
     String filename = "/";
     filename += doc[F("NAME")].as<String>();
 
+    if((!action.equals(F("load")) && !action.equals(F("save"))) ||
+       filename.length() < 2 || filename.length() > 65)
+    {
+        server->send(422, F("text/plain"), F("Invalid action or filename"));
+        return;
+    }
+    if(isProtectedMutationPath(filename))
+    {
+        server->send(403, F("text/plain"), F("Permission denied."));
+        return;
+    }
+
     if (action.equals("load"))
     {
         copyFile("/cmdq.json", "/cmdq.backup");
-        copyFile(filename, "/cmdq.json");
+        if(!copyFile(filename, "/cmdq.json"))
+        {
+            server->send(404, F("text/plain"), F("Command queue file not found"));
+            return;
+        }
         bwc->reloadCommandQueue();
     }
-    if (action.equals("save"))
+    else
     {
-        copyFile("/cmdq.json", filename);
+        if(!copyFile("/cmdq.json", filename))
+        {
+            server->send(500, F("text/plain"), F("Unable to save command queue file"));
+            return;
+        }
     }
 
     server->send(200, F("text/plain"), "");
     BWC_YIELD;
 }
 
-void copyFile(String source, String dest)
+bool copyFile(const String &source, const String &dest)
 {
+    // Keep this guard in the shared helper as well as in the HTTP handler so a
+    // future caller cannot copy credentials to a public alias or overwrite
+    // SUPLA runtime storage accidentally.
+    if(isProtectedMutationPath(source) || isProtectedMutationPath(dest))
+        return false;
+
     char ibuffer[64]; // declare a buffer
 
     File f_source = LittleFS.open(source, "r"); // open source file to read
     if (!f_source)
     {
-        return;
+        return false;
     }
 
     File f_dest = LittleFS.open(dest, "w"); // open destination file to write
     if (!f_dest)
     {
-        return;
+        f_source.close();
+        return false;
     }
 
+    bool copied = true;
     while (f_source.available() > 0)
     {
         byte i = f_source.readBytes(ibuffer, 64); // i = number of bytes placed in buffer from file f_source
-        f_dest.write(ibuffer, i);                 // write i bytes from buffer to file f_dest
+        if(f_dest.write(ibuffer, i) != i)
+        {
+            copied = false;
+            break;
+        }
     }
 
     f_dest.close();   // done, close the destination file
     f_source.close(); // done, close the source file
     BWC_YIELD;
+    return copied;
 }
 
 /**
@@ -1436,16 +2485,18 @@ void loadWifi()
     // if (doc.containsKey(F("noModemSleep"))) wifi_info->noModemSleep = doc[F("noModemSleep")].as<bool>();
     // if (doc.containsKey(F("phyMode")))      wifi_info->phyMode      = doc[F("phyMode")].as<int>();
 
+    wifiConfigurationLoaded = false;
     BWC_YIELD;
-    EEPROM.begin(sizeof(sWifi_info_eeprom_t)+sizeof(sMQTT_info_eeprom_t)+sizeof(sHW_config_eeprom_t)); // EEPROM is used to store wifi credentials and other settings, so we need to init it before loading those settings.
+    EEPROM.begin(EEPROM_CONFIG_SIZE); // Cover every persisted config block before committing any of them.
 
     sWifi_info_eeprom_t wifi_info_eeprom;
-    EEPROM.get(0, wifi_info_eeprom);
+    EEPROM.get(WIFI_CONFIG_EEPROM_OFFSET, wifi_info_eeprom);
     EEPROM.end();
     if(*(uint32_t*)(wifi_info_eeprom.tag) != 0x49464957) { // "WIFI" in hex (backwards), used to check if the eeprom contains valid wifi config
         BWC_LOG_P(PSTR("No valid wifi config in EEPROM. Using defaults.\n"),0);
         return;
     }   
+    wifiConfigurationLoaded = true;
     wifi_info->apSsid = String(wifi_info_eeprom.apSsid);
     wifi_info->apPwd = String(wifi_info_eeprom.apPwd);
     BWC_LOG_P(PSTR("Loaded WiFi config: %s\n"), wifi_info->apSsid.c_str());
@@ -1473,7 +2524,7 @@ void loadWifi()
 /**
  * save WiFi json configuration to EEPROM
  */
-void saveWifi()
+bool saveWifi()
 {
     // File file = LittleFS.open(F("/wifi.json"), "w");
     // if (!file)
@@ -1505,13 +2556,14 @@ void saveWifi()
     // }
     // file.close();
     BWC_YIELD;
-    EEPROM.begin(sizeof(sWifi_info_eeprom_t)+sizeof(sMQTT_info_eeprom_t)+sizeof(sHW_config_eeprom_t)); // EEPROM is used to store wifi credentials and other settings, so we need to init it before loading those settings.
+    EEPROM.begin(EEPROM_CONFIG_SIZE); // Cover every persisted config block before committing any of them.
 
     sWifi_info_eeprom_t wifi_info_eeprom;
-    BWC_LOG_P(PSTR("Size of eeprom: %d\n"), sizeof(sWifi_info_eeprom_t)+sizeof(sMQTT_info_eeprom_t)+sizeof(sHW_config_eeprom_t));
+    BWC_LOG_P(PSTR("Size of eeprom: %d\n"), EEPROM_CONFIG_SIZE);
     if(wifi_info->apSsid.length() >= sizeof(wifi_info_eeprom.apSsid) || wifi_info->apPwd.length() >= sizeof(wifi_info_eeprom.apPwd)) {
         BWC_LOG_P(PSTR("WiFi SSID or password too long to save to EEPROM\n"),0);
-        return;
+        EEPROM.end();
+        return false;
     }
     strcpy(wifi_info_eeprom.apSsid, wifi_info->apSsid.c_str());
     strcpy(wifi_info_eeprom.apPwd, wifi_info->apPwd.c_str());
@@ -1534,9 +2586,12 @@ void saveWifi()
     wifi_info_eeprom.txPowerDbm = wifi_info->txPowerDbm;
     wifi_info_eeprom.noModemSleep = wifi_info->noModemSleep;
     wifi_info_eeprom.phyMode = wifi_info->phyMode;
-    EEPROM.put(0, wifi_info_eeprom);
-    EEPROM.commit();
+    EEPROM.put(WIFI_CONFIG_EEPROM_OFFSET, wifi_info_eeprom);
+    wifiConfigurationLoaded = EEPROM.commit();
+    if(!wifiConfigurationLoaded)
+        BWC_LOG_P(PSTR("WiFi config EEPROM commit failed\n"), 0);
     EEPROM.end();
+    return wifiConfigurationLoaded;
 }
 
 /**
@@ -1596,7 +2651,7 @@ void handleSetWifi()
         server->send(400, F("text/plain"), F("Error deserializing message"));
         return;
     }
-    BWC_LOG_P(PSTR("Received WiFi config: %s\n"), message.c_str());
+    // Never print the request body: it contains the home-network password.
     wifi_info->enableAp = doc[F("enableAp")];
     if (doc.containsKey("enableWM"))
         wifi_info->enableWmApFallback = doc[F("enableWM")];
@@ -1613,9 +2668,16 @@ void handleSetWifi()
     if (doc.containsKey(F("txPowerDbm")))   wifi_info->txPowerDbm   = doc[F("txPowerDbm")].as<float>();
     if (doc.containsKey(F("noModemSleep"))) wifi_info->noModemSleep = doc[F("noModemSleep")].as<bool>();
     if (doc.containsKey(F("phyMode")))      wifi_info->phyMode      = doc[F("phyMode")].as<int>();
-    saveWifi();
+    if(!saveWifi())
+    {
+        server->send(500, F("application/json"), F("{\"error\":\"EEPROM write failed\"}"));
+        return;
+    }
 
-    server->send(200, F("text/plain"), "");
+    server->send(200,
+                 F("application/json"),
+                 F("{\"saved\":true,\"restarting\":true}"));
+    scheduleDeviceRestart(true);
 }
 
 /*
@@ -1697,9 +2759,9 @@ void loadMqtt()
     // mqtt_info->mqttTelemetryInterval = doc[F("mqttTelemetryInterval")];
     BWC_YIELD;
     //TODO: move this to the function that uses it. Don't forget to end eeprom. It will reserve memory always otherwise, even if not used.
-    EEPROM.begin(sizeof(sWifi_info_eeprom_t)+sizeof(sMQTT_info_eeprom_t)+sizeof(sHW_config_eeprom_t)); // EEPROM is used to store wifi credentials and other settings, so we need to init it before loading those settings.
+    EEPROM.begin(EEPROM_CONFIG_SIZE); // Cover every persisted config block before committing any of them.
     sMQTT_info_eeprom_t mqtt_info_eeprom;
-    EEPROM.get(sizeof(sWifi_info_eeprom_t), mqtt_info_eeprom);
+    EEPROM.get(MQTT_CONFIG_EEPROM_OFFSET, mqtt_info_eeprom);
     EEPROM.end();
     if(*(uint32_t*)(mqtt_info_eeprom.tag) != 0x5454514D) { // "MQTT" in hex (backwards), used to check if the eeprom contains valid mqtt config
         BWC_LOG_P(PSTR("No valid MQTT config in EEPROM. Using defaults.\n"), 0);
@@ -1745,11 +2807,12 @@ void saveMqtt()
     // file.close();
     BWC_YIELD;
         //TODO: move this to the function that uses it. Don't forget to end eeprom. It will reserve memory always otherwise, even if not used.
-    EEPROM.begin(sizeof(sWifi_info_eeprom_t)+sizeof(sMQTT_info_eeprom_t)+sizeof(sHW_config_eeprom_t)); // EEPROM is used to store wifi credentials and other settings, so we need to init it before loading those settings.
+    EEPROM.begin(EEPROM_CONFIG_SIZE); // Cover every persisted config block before committing any of them.
     sMQTT_info_eeprom_t mqtt_info_eeprom;
     BWC_LOG_P(PSTR("Size of mqtt_info_eeprom: %d\n"), sizeof(mqtt_info_eeprom));  
     if(mqtt_info->mqttHost.length() >= sizeof(mqtt_info_eeprom.mqttHost) || mqtt_info->mqttUsername.length() >= sizeof(mqtt_info_eeprom.mqttUsername) || mqtt_info->mqttPassword.length() >= sizeof(mqtt_info_eeprom.mqttPassword) || mqtt_info->mqttClientId.length() >= sizeof(mqtt_info_eeprom.mqttClientId) || mqtt_info->mqttBaseTopic.length() >= sizeof(mqtt_info_eeprom.mqttBaseTopic)) {
         BWC_LOG_P(PSTR("MQTT config fields too long to save to EEPROM"),0);
+        EEPROM.end();
         return;
     }
     strcpy(mqtt_info_eeprom.mqttHost, mqtt_info->mqttHost.c_str());
@@ -1761,7 +2824,7 @@ void saveMqtt()
     strcpy(mqtt_info_eeprom.mqttClientId, mqtt_info->mqttClientId.c_str());
     strcpy(mqtt_info_eeprom.mqttBaseTopic, mqtt_info->mqttBaseTopic.c_str());
     mqtt_info_eeprom.useMqtt = mqtt_info->useMqtt;
-    EEPROM.put(sizeof(sWifi_info_eeprom_t), mqtt_info_eeprom);
+    EEPROM.put(MQTT_CONFIG_EEPROM_OFFSET, mqtt_info_eeprom);
     EEPROM.commit();
     EEPROM.end();
 }
@@ -1834,148 +2897,359 @@ void handleSetMqtt()
     BWC_YIELD;
 }
 
-/**
- * response for /dir/
- * web server prints a list of files
- */
-void handleDir()
+/** Load the versioned SUPLA identity and account assignment from EEPROM. */
+void loadSupla()
 {
-    // HeapSelectIram ephemeral;
-    String mydir;
-    mydir.reserve(128);
-    server->setContentLength(CONTENT_LENGTH_UNKNOWN);
-    server->send(200, F("text/html"), "");
-    Dir root = LittleFS.openDir("/");
-    while (root.next())
-    {
-        // Serial.println(root.fileName());
-        String href = root.fileName();
-        if (href.endsWith(".gz"))
-            href.remove(href.length() - 3);
-        mydir += F("<a href=\"/");
-        mydir += href;
-        mydir += F("\">");
-        mydir += root.fileName();
-        mydir += F("</a>");
-        mydir += F(" Size: ");
-        mydir += String(root.fileSize());
-        mydir += F(" Bytes ");
-        mydir += F(" <a href=\"/remove/?FileToRemove=");
-        mydir += root.fileName();
-        mydir += F("\">remove</a><br>");
-        server->sendContent(mydir);
-        mydir.clear();
-    }
-    server->sendContent("");
-}
+    supla_info->server = "";
+    supla_info->email = "";
+    supla_info->setupPassword = String(WM_AP_PASSWORD_F);
+    supla_info->enabled = false;
+    supla_info->configured = false;
+    supla_info->setupPasswordConfigured = true;
+    memset(supla_info->guid, 0, sizeof(supla_info->guid));
+    memset(supla_info->authKey, 0, sizeof(supla_info->authKey));
 
-/**
- * response for /upload.html
- * upload a new file to the LittleFS
- */
-void handleFileUpload()
-{
-    HTTPUpload &upload = server->upload();
-    String path;
-    /** a file variable to temporarily store the received file */
-    if (upload.status == UPLOAD_FILE_START)
-    {
-        path = upload.filename;
-        if (!path.startsWith("/"))
-        {
-            path = "/" + path;
-        }
+    sSupla_info_eeprom_t stored;
+    EEPROM.begin(EEPROM_CONFIG_SIZE);
+    EEPROM.get(SUPLA_CONFIG_EEPROM_OFFSET, stored);
+    EEPROM.end();
 
-        // The file server always prefers a compressed version of a file
-        if (!path.endsWith(".gz"))
-        {
-            // So if an uploaded file is not compressed, the existing compressed
-            String pathWithGz = path + ".gz";
-            // version of that file must be deleted (if it exists)
-            if (LittleFS.exists(pathWithGz))
-            {
-                LittleFS.remove(pathWithGz);
-            }
-        }
+    const bool stringsTerminated =
+        memchr(stored.server, '\0', sizeof(stored.server)) != nullptr &&
+        memchr(stored.email, '\0', sizeof(stored.email)) != nullptr &&
+        memchr(stored.setupPassword, '\0', sizeof(stored.setupPassword)) != nullptr;
+    const bool valid = memcmp(stored.tag, "SUPL", sizeof(stored.tag)) == 0 &&
+                       stored.version == SUPLA_CONFIG_VERSION &&
+                       stringsTerminated &&
+                       stored.checksum == suplaConfigChecksum(stored);
+    if (!valid)
+    {
+        BWC_LOG_P(PSTR("SUPLA > no valid configuration in EEPROM\n"), 0);
+        return;
+    }
 
-        BWC_LOG_P(PSTR("FS > upload filename: %s\n"), path.c_str());
-
-        // Open the file for writing in LittleFS (create if it doesn't exist)
-        fsUploadFile = LittleFS.open(path, "w");
-        path = String();
-    }
-    else if (upload.status == UPLOAD_FILE_WRITE)
+    supla_info->server = stored.server;
+    supla_info->email = stored.email;
+    supla_info->enabled = stored.enabled;
+    memcpy(supla_info->guid, stored.guid, sizeof(supla_info->guid));
+    memcpy(supla_info->authKey, stored.authKey, sizeof(supla_info->authKey));
+    supla_info->configured = !supla_info->email.isEmpty() &&
+                             !isAllZero(supla_info->guid, sizeof(supla_info->guid)) &&
+                             !isAllZero(supla_info->authKey, sizeof(supla_info->authKey));
+    if (supla_info->enabled && !supla_info->configured)
     {
-        if (fsUploadFile)
-        {
-            // Write the received bytes to the file
-            fsUploadFile.write(upload.buf, upload.currentSize);
-            // Serial.print("file write ");
-            // Serial.println(path);
-        }
-    }
-    else if (upload.status == UPLOAD_FILE_END)
-    {
-        if (fsUploadFile)
-        {
-            fsUploadFile.close();
-            BWC_LOG_P(PSTR("FS > upload size: %d\n"), upload.totalSize);
-            server->sendHeader(F("location"), F("success.html"));
-            server->send(303);
-            if (upload.filename == "cmdq.json")
-            {
-                bwc->reloadCommandQueue();
-            }
-            if (upload.filename == "settings.json")
-            {
-                bwc->reloadSettings();
-            }
-        }
-        else
-        {
-            BWC_LOG_P(PSTR("FA > error: %d\n"), upload.status);
-            server->send(500, F("text/plain"), F("500: couldn't create file"));
-        }
-    }
-    else
-    {
-        BWC_LOG_P(PSTR("FA > upload aborted: %d\n"), upload.status);
-        server->send(500, F("text/plain"), F("500: upload aborted"));
+        BWC_LOG_P(PSTR("SUPLA > incomplete or unclaimed configuration; integration disabled\n"), 0);
+        supla_info->enabled = false;
     }
 }
 
-/**
- * response for /remove.html
- * delete a file from the LittleFS
- */
-void handleFileRemove()
+/** Persist a complete SUPLA candidate without mutating the live configuration. */
+static bool persistSuplaConfig(const sSupla_info &config)
 {
-    String path;
-    path = server->arg(F("FileToRemove"));
-    if (!path.startsWith("/"))
+    if (config.server.length() >= SUPLA_SERVER_MAX_SIZE ||
+        config.email.length() >= SUPLA_EMAIL_MAX_SIZE)
+        return false;
+
+    sSupla_info_eeprom_t stored;
+    stored.enabled = config.enabled;
+    memcpy(stored.guid, config.guid, sizeof(stored.guid));
+    memcpy(stored.authKey, config.authKey, sizeof(stored.authKey));
+    snprintf(stored.server, sizeof(stored.server), "%s", config.server.c_str());
+    snprintf(stored.email, sizeof(stored.email), "%s", config.email.c_str());
+    snprintf(stored.setupPassword,
+             sizeof(stored.setupPassword),
+             "%s",
+             String(WM_AP_PASSWORD_F).c_str());
+    stored.checksum = suplaConfigChecksum(stored);
+
+    EEPROM.begin(EEPROM_CONFIG_SIZE);
+    sSupla_info_eeprom_t previous;
+    EEPROM.get(SUPLA_CONFIG_EEPROM_OFFSET, previous);
+    EEPROM.put(SUPLA_CONFIG_EEPROM_OFFSET, stored);
+    const bool saved = EEPROM.commit();
+
+    if (!saved)
     {
-        path = "/" + path;
+        // EEPROM.end() commits dirty data once more. Restore the previous
+        // bytes first so that its retry can never persist a rejected candidate.
+        EEPROM.put(SUPLA_CONFIG_EEPROM_OFFSET, previous);
+        if (!EEPROM.commit())
+            BWC_LOG_P(PSTR("SUPLA > EEPROM rollback failed\n"), 0);
+    }
+    EEPROM.end();
+    return saved;
+}
+
+/** Persist the current SUPLA settings (kept for internal API compatibility). */
+bool saveSupla()
+{
+    return persistSuplaConfig(*supla_info);
+}
+
+void startSupla()
+{
+    if (suplaBridge || !supla_info->enabled || !supla_info->configured)
+        return;
+
+    HeapSelectIram ephemeral;
+    suplaBridge = new SuplaSpaBridge;
+    if (!suplaBridge ||
+        !suplaBridge->begin(bwc,
+                            supla_info->guid,
+                            supla_info->authKey,
+                            supla_info->server.c_str(),
+                            supla_info->email.c_str()))
+    {
+        BWC_LOG_P(PSTR("SUPLA > initialization failed\n"), 0);
+        delete suplaBridge;
+        suplaBridge = nullptr;
+        return;
     }
 
-    // Serial.print(F("handleFileRemove Name: "));
-    // Serial.println(path);
+    SpaSnapshot snapshot;
+    if (bwc->getSnapshot(snapshot))
+        suplaBridge->sync(snapshot, true);
+    BWC_LOG_P(PSTR("SUPLA > integration started\n"), 0);
+}
 
-    if (LittleFS.exists(path) && LittleFS.remove(path))
+void handleGetSupla()
+{
+    server->sendHeader(F("Cache-Control"), F("no-store"));
+    if (server->method() != HTTP_GET)
     {
-        // Serial.print(F("handleFileRemove success: "));
-        // Serial.println(path);
-        if (server->method() == HTTP_GET)
-            server->sendHeader(F("Location"), F("/dir/"));
-        else
-            server->sendHeader(F("Location"), F("/success.html"));
-        server->send(303);
+        server->send(405, F("application/json"), F("{\"error\":\"Method not allowed\"}"));
+        return;
     }
-    else
+
+    StaticJsonDocument<640> doc;
+    const bool configurationUnlocked = isSuplaConfigurationUnlocked();
+    // The per-boot token also protects destructive local actions from
+    // cross-origin requests.
+    ensureSuplaCsrfToken();
+    doc[F("enabled")] = supla_info->enabled;
+    // Do not expose account data through the unauthenticated local status API.
+    // An empty e-mail on save means "keep the existing assignment" when this
+    // flag is true.
+    doc[F("email")] = "";
+    doc[F("emailConfigured")] = supla_info->configured;
+    doc[F("server")] = supla_info->server;
+    doc[F("configured")] = supla_info->configured;
+    doc[F("wifiConfigured")] = hasHomeNetworkConfiguration();
+    doc[F("setupPasswordConfigured")] = supla_info->setupPasswordConfigured;
+    doc[F("configurationUnlocked")] = configurationUnlocked;
+    doc[F("provisioningSecondsRemaining")] = suplaProvisioningSecondsRemaining();
+    doc[F("running")] = suplaBridge && suplaBridge->isRunning();
+    doc[F("status")] = currentSuplaStatus();
+    doc[F("csrfToken")] = suplaCsrfToken;
+
+    String json;
+    json.reserve(384);
+    if (serializeJson(doc, json) == 0)
     {
-        // Serial.print(F("handleFileRemove error: "));
-        // Serial.println(path);
-        server->send(500, F("text/plain"), F("500: couldn't delete file"));
+        server->send(500, F("application/json"), F("{\"error\":\"Serialization failed\"}"));
+        return;
     }
+    server->send(200, F("application/json"), json);
+}
+
+void handleSetSupla()
+{
+    server->sendHeader(F("Cache-Control"), F("no-store"));
+    if (!hasJsonContentType())
+    {
+        server->send(415, F("application/json"), F("{\"error\":\"Content-Type must be application/json\"}"));
+        return;
+    }
+    if (!hasExclusivePlainBody())
+    {
+        server->send(400, F("application/json"), F("{\"error\":\"Missing JSON body\"}"));
+        return;
+    }
+
+    // Worst case includes a 255-byte e-mail, a 64-byte server name and the
+    // 32-byte CSRF token.
+    StaticJsonDocument<640> doc;
+    const DeserializationError error = deserializeJson(doc, server->arg(F("plain")));
+    if (error || !doc.is<JsonObject>() ||
+        !doc[F("enabled")].is<bool>() ||
+        !doc[F("email")].is<const char *>() ||
+        !doc[F("server")].is<const char *>() ||
+        !doc[F("csrfToken")].is<const char *>())
+    {
+        server->send(400, F("application/json"), F("{\"error\":\"Invalid configuration\"}"));
+        return;
+    }
+
+    if (!isValidSuplaCsrfToken(doc[F("csrfToken")].as<const char *>()))
+    {
+        server->send(403, F("application/json"), F("{\"error\":\"Invalid request token\"}"));
+        return;
+    }
+
+    String email = doc[F("email")].as<String>();
+    String serverName = doc[F("server")].as<String>();
+    email.trim();
+    serverName.trim();
+    const bool enabled = doc[F("enabled")].as<bool>();
+    if (email.isEmpty() && supla_info->configured)
+        email = supla_info->email;
+
+    if (enabled && email.isEmpty())
+    {
+        server->send(422, F("application/json"), F("{\"error\":\"Enabled SUPLA requires an e-mail\"}"));
+        return;
+    }
+
+    if (enabled && !hasHomeNetworkConfiguration())
+    {
+        server->send(422,
+                     F("application/json"),
+                     F("{\"error\":\"Configure the home WiFi network before enabling SUPLA\"}"));
+        return;
+    }
+
+    if (email.length() >= SUPLA_EMAIL_MAX_SIZE ||
+        serverName.length() >= SUPLA_SERVER_MAX_SIZE ||
+        (!email.isEmpty() && !isValidSuplaEmail(email)) || !isValidSuplaServer(serverName))
+    {
+        server->send(422, F("application/json"), F("{\"error\":\"Invalid e-mail or server name\"}"));
+        return;
+    }
+
+    sSupla_info candidate = *supla_info;
+    const bool identityMissing =
+        isAllZero(supla_info->guid, sizeof(supla_info->guid)) ||
+        isAllZero(supla_info->authKey, sizeof(supla_info->authKey));
+    const bool emailChanged = supla_info->configured &&
+                              !supla_info->email.equalsIgnoreCase(email);
+    const bool serverChanged = supla_info->configured &&
+                               supla_info->server != serverName;
+    if (emailChanged || serverChanged || identityMissing)
+        generateSuplaIdentity(candidate);
+
+    candidate.email = email;
+    candidate.server = serverName;
+    candidate.setupPassword = String(WM_AP_PASSWORD_F);
+    candidate.setupPasswordConfigured = true;
+    candidate.enabled = enabled;
+    candidate.configured = !email.isEmpty() &&
+                           !isAllZero(candidate.guid, sizeof(candidate.guid)) &&
+                           !isAllZero(candidate.authKey, sizeof(candidate.authKey));
+
+    if (!persistSuplaConfig(candidate))
+    {
+        server->send(500, F("application/json"), F("{\"error\":\"EEPROM write failed\"}"));
+        return;
+    }
+
+    // Only disrupt the working bridge and its runtime storage after the new
+    // EEPROM record is durable. A failed write leaves the old session intact.
+    const bool associationChanged = emailChanged || serverChanged || identityMissing;
+    if (suplaBridge && (associationChanged || !enabled))
+        suplaBridge->stop();
+    if (associationChanged)
+        removeSuplaRuntimeConfig();
+    *supla_info = candidate;
+
+    server->send(200, F("application/json"), F("{\"saved\":true,\"restartRequired\":true}"));
+    scheduleDeviceRestart(true);
+}
+
+void handleResetSupla()
+{
+    server->sendHeader(F("Cache-Control"), F("no-store"));
+    if (!hasJsonContentType())
+    {
+        server->send(415, F("application/json"), F("{\"error\":\"Content-Type must be application/json\"}"));
+        return;
+    }
+    if (!hasExclusivePlainBody())
+    {
+        server->send(400, F("application/json"), F("{\"error\":\"Missing JSON body\"}"));
+        return;
+    }
+
+    StaticJsonDocument<256> doc;
+    const DeserializationError error = deserializeJson(doc, server->arg(F("plain")));
+    if (error || !doc.is<JsonObject>() || !doc[F("csrfToken")].is<const char *>())
+    {
+        server->send(400, F("application/json"), F("{\"error\":\"Invalid reset request\"}"));
+        return;
+    }
+
+    if (!isValidSuplaCsrfToken(doc[F("csrfToken")].as<const char *>()))
+    {
+        server->send(403, F("application/json"), F("{\"error\":\"Invalid request token\"}"));
+        return;
+    }
+
+    // Reset only the SUPLA cloud assignment. WiFi and the standard setup AP
+    // password stay unchanged.
+    sSupla_info candidate = *supla_info;
+    candidate.enabled = false;
+    candidate.configured = false;
+    candidate.server = "";
+    candidate.email = "";
+    candidate.setupPassword = String(WM_AP_PASSWORD_F);
+    candidate.setupPasswordConfigured = true;
+    generateSuplaIdentity(candidate);
+
+    if (!persistSuplaConfig(candidate))
+    {
+        server->send(500, F("application/json"), F("{\"error\":\"EEPROM write failed\"}"));
+        return;
+    }
+
+    if (suplaBridge)
+        suplaBridge->stop();
+    removeSuplaRuntimeConfig();
+    *supla_info = candidate;
+
+    server->send(200, F("application/json"), F("{\"reset\":true,\"restartRequired\":true}"));
+    scheduleDeviceRestart(true);
+}
+
+void handleFactoryReset()
+{
+    server->sendHeader(F("Cache-Control"), F("no-store"));
+    if(!hasJsonContentType())
+    {
+        server->send(415,
+                     F("application/json"),
+                     F("{\"error\":\"Content-Type must be application/json\"}"));
+        return;
+    }
+    if(!hasExclusivePlainBody())
+    {
+        server->send(400,
+                     F("application/json"),
+                     F("{\"error\":\"Missing JSON body\"}"));
+        return;
+    }
+
+    StaticJsonDocument<128> doc;
+    const DeserializationError error = deserializeJson(doc, server->arg(F("plain")));
+    if(error || !doc.is<JsonObject>() || !doc[F("csrfToken")].is<const char *>())
+    {
+        server->send(400,
+                     F("application/json"),
+                     F("{\"error\":\"Invalid factory reset request\"}"));
+        return;
+    }
+
+    if(!isValidSuplaCsrfToken(doc[F("csrfToken")].as<const char *>()))
+    {
+        server->send(403,
+                     F("application/json"),
+                     F("{\"error\":\"Invalid request token\"}"));
+        return;
+    }
+
+    factoryResetRequested = true;
+    server->send(200,
+                 F("application/json"),
+                 F("{\"reset\":true,\"restarting\":true}"));
+    scheduleDeviceRestart(true);
 }
 
 /**
@@ -2208,6 +3482,54 @@ time_t getBootTime()
     time_t seconds = millis() / 1000;
     time_t result = time(nullptr) - seconds;
     return result;
+}
+
+void handleHealth()
+{
+    server->sendHeader(F("Cache-Control"), F("no-store"));
+#ifdef ESP8266
+    const uint32_t freeHeap = ESP.getFreeHeap();
+    const uint32_t maxBlock = ESP.getMaxFreeBlockSize();
+    StaticJsonDocument<768> doc;
+    doc[F("ok")] = freeHeap >= 6000 && maxBlock >= 4096;
+    doc[F("firmware")] = FW_VERSION;
+    doc[F("uptimeSeconds")] = millis() / 1000UL;
+    doc[F("unixTime")] = static_cast<uint64_t>(time(nullptr));
+    doc[F("freeHeap")] = freeHeap;
+    doc[F("minimumHeap")] = heap_water_mark;
+    doc[F("largestHeapBlock")] = maxBlock;
+    doc[F("heapFragmentationPercent")] = ESP.getHeapFragmentation();
+    doc[F("freeContinuationStack")] = ESP.getFreeContStack();
+    doc[F("wifiConnected")] = WiFi.status() == WL_CONNECTED;
+    doc[F("wifiRssi")] = WiFi.status() == WL_CONNECTED ? WiFi.RSSI() : 0;
+    doc[F("wifiGotIpCount")] = wifiGotIpCount;
+    doc[F("wifiDisconnectCount")] = wifiDisconnectCount;
+    doc[F("wifiLastDisconnectReason")] = wifiLastDisconnectReason;
+    doc[F("wifiLastDisconnectMillis")] = wifiLastDisconnectMillis;
+    doc[F("suplaRunning")] = suplaBridge && suplaBridge->isRunning();
+    doc[F("suplaStatus")] = suplaBridge ? suplaBridge->status() : "stopped";
+    doc[F("resetReason")] = ESP.getResetReason();
+    doc[F("model")] = bwc ? bwc->getModel() : "unknown";
+    if(bwc && bwc->cio && bwc->dsp)
+    {
+        doc[F("cioGoodPackets")] = bwc->cio->good_packets_count;
+        doc[F("cioBadPackets")] = bwc->cio->bad_packets_count;
+        doc[F("cioPacketError")] = bwc->cio->packet_error;
+        doc[F("dspGoodPackets")] = bwc->dsp->good_packets_count;
+        doc[F("dspBadPackets")] = bwc->dsp->bad_packets_count;
+    }
+
+    String json;
+    json.reserve(640);
+    if(serializeJson(doc, json) == 0)
+    {
+        server->send(500, F("application/json"), F("{\"ok\":false,\"error\":\"serialization\"}"));
+        return;
+    }
+    server->send(200, F("application/json"), json);
+#else
+    server->send(501, F("application/json"), F("{\"ok\":false}"));
+#endif
 }
 
 void handleESPInfo()

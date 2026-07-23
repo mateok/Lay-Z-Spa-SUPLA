@@ -56,7 +56,6 @@
         <tr>
             <td>
                 <label for="calibration" data-i18n="label_calibrated">Calibrated:</label>
-                <!-- Au lieu de data-text, on utilise data-i18n="[data-text]clé" -->
                 <span data-i18n="[data-text]tooltip_calibrated_info" class="tooltip" 
                     data-text="If checked, the virtual temperature is calibrated. Recalibrate by deselecting and pressing the SAVE button.">
                     ?
@@ -246,11 +245,13 @@
     const resetcleanfiltertimer = 23
     const setpower = 24
 
-    const commandlist = [
-        'Set target', 'Set unit', 'Set bubbles', 'Set heat', 'Set pump', 'Reset queue', 'Reboot ESP',
-        'Internal cmd', 'Reset times', 'Reset Cl timer', 'Reset change filter timer', 'Set jets', 'Set brightness',
-        'Beep', 'Set ambient temp F.', 'Set ambient temp C.', 'Reset daily meter', 'Take control', 'Full power',
-        'Print text', 'Set ready', 'Set R', 'Reset rinse filter timer', 'Reset clean filter timer', 'Set power'
+    const commandTranslationKeys = [
+        'option_set_target', 'option_set_unit', 'option_set_bubbles', 'option_set_heat', 'option_set_pump',
+        'option_reset_queue', 'option_reboot_esp', 'option_internal_cmd', 'option_reset_times', 'option_reset_cl',
+        'option_reset_filter_change', 'option_set_jets', 'option_set_brightness', 'option_beep',
+        'option_set_ambient_f', 'option_set_ambient_c', 'option_reset_daily', 'option_take_control',
+        'option_full_power', 'option_print_text', 'option_set_ready', 'option_set_R',
+        'option_reset_filter_rinse', 'option_reset_filter_clean', 'option_set_power'
     ]
 
     function totimestamp() {
@@ -277,7 +278,9 @@
                 document.getElementById('notificationtime').value = json.NOTIFTIME.toString()
                 document.getElementById('restore').checked = json.RESTORE
                 var date = new Date(json.REBOOTTIME * 1000)
-                document.getElementById('lastboot').innerHTML = 'Last boot: ' + date.toLocaleString() + ' ' + json.REBOOTINFO
+                document.getElementById('lastboot').textContent =
+                    getTranslation('footer_last_boot_label', 'Ostatnie uruchomienie') + ': ' +
+                    date.toLocaleString() + ' ' + json.REBOOTINFO
                 document.getElementById('calibration').checked = json.VTCAL
                 document.getElementById('lock_btn').checked = json.LCK
                 document.getElementById('timer_btn').checked = json.TMR
@@ -361,14 +364,18 @@
                     var row = table.insertRow()
                     var cell = row.insertCell(0)
                     cell.innerHTML = '<button id="editCmd' + i + '" class="button" onclick="editCommandQueue(' + i + ')">' +
-                        '<span data-i18n="btn_set">Set</span>' +
+                        '<span>' + getTranslation('btn_set', 'Ustaw') + '</span>' +
                         '</button>'
                     var date = new Date(json.XTIME[i] * 1000)
                     cell = row.insertCell(1)
-                    cell.innerHTML = commandlist[json['CMD'][i]] + ':' + json['VALUE'][i] + '<br>' + date.toLocaleString() + '<br>Interval: ' + json['INTERVAL'][i] + 's'
+                    const commandKey = commandTranslationKeys[json['CMD'][i]]
+                    const commandName = getTranslation(commandKey, commandKey || 'Polecenie')
+                    cell.innerHTML = commandName + ': ' + json['VALUE'][i] + '<br>' + date.toLocaleString() +
+                        '<br>' + getTranslation('label_repeat_interval', 'Interwał powtarzania') + ': ' +
+                        json['INTERVAL'][i] + ' s'
                     cell = row.insertCell(2)
                     cell.innerHTML = '<button id="delCmd' + i + '" class="button_red" onclick="delCommand(' + i + ')">' +
-                        '<span data-i18n="btn_del">Del</span>' +
+                        '<span>' + getTranslation('btn_del', 'Usuń') + '</span>' +
                         '</button>'
                 }
             }
@@ -404,7 +411,7 @@
     }
 
     function savetofile() {
-        var filename = prompt("Please enter a filename", "mycommandqueue1")
+        var filename = prompt(getTranslation('prompt_filename', 'Podaj nazwę pliku'), "mycommandqueue1")
         if (filename == null) return
         var req = new XMLHttpRequest()
         req.open('POST', '/cmdq_file/')
@@ -417,7 +424,7 @@
     }
 
     function loadfromfile() {
-        var filename = prompt("Please enter a filename", "mycommandqueue1")
+        var filename = prompt(getTranslation('prompt_filename', 'Podaj nazwę pliku'), "mycommandqueue1")
         if (filename == null) return
         var req = new XMLHttpRequest()
         req.open('POST', '/cmdq_file/')

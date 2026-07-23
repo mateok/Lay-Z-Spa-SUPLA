@@ -1,0 +1,368 @@
+# Polski interfejs użytkownika Lay-Z-Spa
+title_home=Moduł Lay-Z-Spa
+title_success=Moduł Lay-Z-Spa
+header_module=Moduł Lay-Z-Spa
+header_by=autor: visualapproach
+
+# Menu
+menu_home=Strona główna
+menu_hwconfig=Konfiguracja sprzętowa
+menu_spaconfig=Konfiguracja SPA
+menu_webconfig=Wygląd panelu
+menu_networkconfig=Konfiguracja sieci
+menu_mqttconfig=Konfiguracja MQTT
+menu_suplaconfig=Konfiguracja SUPLA
+menu_update=Aktualizacja
+menu_restart=Uruchom ponownie ESP
+menu_factory_reset=Ustawienia fabryczne
+
+# Wspólne
+button_save=Zapisz
+button_save_restart=Zapisz i uruchom ponownie
+btn_reset=wyzeruj
+btn_set=Ustaw
+btn_del=Usuń
+btn_browse=Wybierz plik…
+btn_upload=wgraj
+btn_remove=Usuń
+btn_delete=usuń
+label_enable=Włączony
+label_password=Hasło:
+label_username=Nazwa użytkownika:
+label_port=Port:
+label_value=Wartość:
+label_text=Tekst:
+value_no_data=brak danych
+unit_seconds=sekundy
+alert_enter_password=Wprowadź hasło, aby kontynuować.
+hardware_saved_restart_note=Zapisano ✓ (uruchom ponownie ESP, aby zastosować ustawienia.)
+prompt_filename=Podaj nazwę pliku
+placeholder_filename=Wprowadź nazwę pliku
+
+# Strona główna
+section_temp_title=Temperatura
+label_actual=Aktualna:
+label_virtual=Wirtualna:
+label_target=Docelowa:
+tooltip_virtual=Temperatura wirtualna uwzględnia bezwładność cieplną i temperaturę otoczenia.
+
+section_control_title=Sterowanie
+control_temp=Temperatura
+control_ambient=Temperatura otoczenia
+control_brightness=Jasność
+tooltip_brightness=Poziom 0 wygasza wyświetlacz i przyciski pompy. Naciśnięcie przycisku podświetli je na 5 sekund.
+
+section_buttons_title=Przyciski
+btn_bubbles=Bąbelki
+btn_heater=Grzanie
+btn_pump=Pompa
+btn_unit=Jednostka (F/C)
+btn_hydrojets=HydroJet
+btn_take_control=Przejmij sterowanie
+
+section_timer_title=Liczniki obsługi
+tim_label_chlorine=Chlor dodano <span id="cltimer">brak danych</span> temu.
+tim_label_filter_change=Filtr wymieniono <span id="freplacetimer">brak danych</span> temu.
+tim_label_filter_clean=Filtr wyczyszczono <span id="fcleantimer">brak danych</span> temu.
+tim_label_filter_rinse=Filtr wypłukano <span id="frinsetimer">brak danych</span> temu.
+
+section_totals_title=Statystyki
+totals_time_label=Czas:
+totals_ready_label=Gotowe za:
+totals_uptime_label=Czas pracy urządzenia:
+totals_pump_label=Pompa:
+totals_heating_label=Grzanie:
+totals_air_label=AirJet:
+totals_hydrojets_label=HydroJet:
+totals_cost_label=Szacowany koszt:
+tooltip_time=ESP podaje czas UTC, a przeglądarka przelicza go na czas lokalny.
+tooltip_ready=Szacowany czas osiągnięcia temperatury docelowej. Najlepszy wynik wymaga prawidłowej temperatury otoczenia.
+tooltip_uptime=Łączny czas pracy ESP od wyzerowania licznika. Restart nie zeruje wartości.
+confirm_reset_totals=Czy na pewno wyzerować statystyki?
+ready_status_ready=gotowe
+ready_status_never=nie osiągnie temperatury
+ready_status_not_ready=jeszcze niegotowe
+
+footer_mqtt_loading=MQTT: wczytywanie stanu…
+footer_supla_loading=SUPLA: wczytywanie stanu…
+footer_fw_loading=Firmware: wczytywanie wersji…
+footer_model_loading=Model: wczytywanie…
+footer_rssi_loading=RSSI: wczytywanie…
+footer_mqtt_label=MQTT
+footer_supla_label=SUPLA
+footer_fw_label=Firmware
+footer_model_label=Model
+mqtt_connection_timeout=przekroczono czas oczekiwania
+mqtt_connection_lost=utracono połączenie
+mqtt_connect_failed=błąd połączenia
+mqtt_disconnected=rozłączony
+mqtt_connected=połączony
+mqtt_bad_protocol=nieobsługiwana wersja protokołu
+mqtt_bad_client_id=odrzucony identyfikator klienta
+mqtt_unavailable=serwer niedostępny
+mqtt_bad_credentials=błędne dane logowania
+mqtt_unauthorized=brak autoryzacji
+
+# Konfiguracja wyglądu
+header_webconfig=Wygląd panelu
+show_section_temp=Pokaż sekcję „Temperatura”
+show_section_display=Pokaż sekcję „Wyświetlacz”
+show_section_control=Pokaż sekcję „Sterowanie”
+show_section_buttons=Pokaż sekcję „Przyciski”
+show_section_timer=Pokaż sekcję „Liczniki obsługi”
+show_section_totals=Pokaż sekcję „Statystyki”
+use_control_selector=Użyj pól wyboru zamiast suwaków
+
+# Konfiguracja SPA
+label_price_kwh=Cena za kWh:
+label_chlorine_interval=Dodawanie chloru (dni):
+label_filter_change_interval=Wymiana filtra (dni):
+label_filter_clean_interval=Czyszczenie filtra (dni):
+label_filter_rinse_interval=Płukanie filtra (dni):
+label_audio=Dźwięki:
+label_notification=Powiadomienie:
+label_notification_time=Czas powiadomienia (s):
+label_restore_states=Przywróć ostatnie stany po uruchomieniu:
+label_calibrated=Skalibrowano:
+link_manual_cal=kalibracja ręczna
+tooltip_calibrated_info=Zaznaczenie oznacza, że temperatura wirtualna jest skalibrowana. Aby wykonać ponowną kalibrację, odznacz opcję i naciśnij ZAPISZ.
+tooltip_calibrate_instr=Wyłącz grzanie i pozostaw włączoną pompę, aż temperatura spadnie o kilka stopni. W tym czasie nie uruchamiaj dysz ani bąbelków. Początkowa temperatura wody powinna różnić się od temperatury otoczenia o kilka stopni.
+
+section_display_buttons=Włączone przyciski wyświetlacza
+label_all=Wszystkie:
+btn_lock=Blokada
+btn_timer=Timer
+btn_air=AirJet
+btn_heat=Grzanie
+btn_down=W dół
+btn_up=W górę
+btn_power=Zasilanie
+btn_jets=HydroJet
+
+label_command=Polecenie:
+option_set_target=Ustaw temperaturę docelową (20–40/68–104)
+option_set_unit=Ustaw jednostkę (0/1)
+option_set_bubbles=Ustaw bąbelki AirJet (0/1)
+option_set_heat=Ustaw grzanie (0/1)
+option_set_pump=Ustaw pompę filtrującą (0/1)
+option_reset_queue=Wyczyść kolejkę (-)
+option_reboot_esp=Uruchom ponownie ESP
+option_internal_cmd=Polecenie wewnętrzne — odczytaj temperaturę docelową (-)
+option_reset_times=Wyzeruj czasy pracy (-)
+option_reset_cl=Wyzeruj licznik chloru (-)
+option_reset_filter_change=Wyzeruj licznik wymiany filtra (-)
+option_set_jets=Ustaw HydroJet (0/1)
+option_set_brightness=Ustaw jasność wyświetlacza (0–8)
+option_beep=Ustaw sygnał dźwiękowy (0/1 lub 2 + nazwa pliku)
+option_set_ambient_f=Ustaw temperaturę otoczenia °F (liczba całkowita)
+option_set_ambient_c=Ustaw temperaturę otoczenia °C (liczba całkowita)
+option_reset_daily=Wyzeruj licznik dzienny
+option_take_control=Przejmij sterowanie (0/1)
+option_full_power=Ustaw pełną moc (0/1)
+option_print_text=Wyświetl tekst
+option_set_ready=Ustaw czas gotowości (-)
+option_set_R=Ustaw R (do użytku wewnętrznego)
+option_reset_filter_rinse=Wyzeruj licznik płukania filtra (-)
+option_reset_filter_clean=Wyzeruj licznik czyszczenia filtra (-)
+option_set_power=Ustaw zasilanie (0/1)
+label_execute_time=Czas wykonania:
+label_repeat_interval=Interwał powtarzania
+note_interval=(0=jednorazowo, 1 h=3600, 1 dzień=86400, 1 tydzień=604800)
+header_command_queue=Kolejka poleceń
+btn_add_new=Dodaj
+btn_clear_queue=Wyczyść kolejkę
+btn_save_to_file=Zapisz do pliku
+btn_load_from_file=Wczytaj z pliku
+footer_last_boot_loading=Ostatnie uruchomienie: wczytywanie…
+footer_last_boot_label=Ostatnie uruchomienie
+
+# Kalibracja ręczna
+title_calib_header=Ręczna kalibracja SPA
+label_start_temp=Temperatura początkowa:
+label_end_temp=Temperatura końcowa:
+label_avg_ambient=Średnia temperatura otoczenia:
+label_time_minutes=Czas (minuty):
+
+# Konfiguracja sprzętowa
+title_hwconfig_header=Konfiguracja sprzętowa
+section_hw_title=Sprzęt:
+label_select_cio=Wybierz model CIO (pompy):
+option_cio_pre2021=6 przewodów, przed 2021 (AirJet)
+option_cio_2021=6 przewodów, 2021 (AirJet)
+option_cio_2021hjt=6 przewodów, 2021 (AirJet + HydroJet)
+option_cio_54149e=6 przewodów, 54149E (AirJet)
+option_cio_54173=4 przewody, 54173 (AirJet + HydroJet)
+option_cio_54154=4 przewody, 54154 (AirJet)
+option_cio_54144=4 przewody, 54144 (HydroJet)
+option_cio_54138=4 przewody, 54138 (AirJet + HydroJet)
+option_cio_54123=4 przewody, 54123 (AirJet)
+label_select_dsp=Wybierz model DSP (wyświetlacza):
+option_dsp_pre2021=6 przewodów, przed 2021 (AirJet)
+option_dsp_2021=6 przewodów, 2021 (AirJet)
+option_dsp_2021hjt=6 przewodów, 2021 (AirJet + HydroJet)
+option_dsp_54149e=6 przewodów, 54149E (AirJet)
+option_dsp_54173=4 przewody, 54173 (AirJet + HydroJet)
+option_dsp_54154=4 przewody, 54154 (AirJet)
+option_dsp_54144=4 przewody, 54144 (HydroJet)
+option_dsp_54138=4 przewody, 54138 (AirJet + HydroJet)
+option_dsp_54123=4 przewody, 54123 (AirJet)
+label_select_pcb=Wybierz płytkę PCB:
+option_pcb_v1=V1
+option_pcb_v2=V2
+option_pcb_v2b=V2B
+option_pcb_custom=Własna
+tooltip_pcb_v2b_info=Jak PCB V2, ale z przewodami przeniesionymi na inne piny dla lepszej zgodności z niektórymi pompami.
+tooltip_pcb_custom_info=Jeśli używasz własnej płytki, wpisz poniżej przypisanie pinów. Nieużywane pola pozostaw puste.
+label_pinout=Przypisanie pinów
+tooltip_pinout_info=Oznaczenia D0–D8 zgodne z nadrukiem na ESP, ale bez litery „D”. Firmware przelicza je na numery GPIO.
+th_cio=CIO
+th_dsp=DSP
+label_ambient_sensor=Czujnik temperatury otoczenia OneWire
+tooltip_ambient_sensor_info=Wymaga czujnika DS18B20 podłączonego do wskazanego pinu. Czujnik okresowo aktualizuje temperaturę otoczenia.
+label_sensor_pin=Pin czujnika (Dx)
+label_power_levels=Poziomy mocy (W)
+tooltip_power_levels_info=Ustawia pobór mocy dla poszczególnych trybów pracy.
+label_override=Nadpisz wartości domyślne
+label_power_heat1=Grzanie — stopień 1
+label_power_heat2=Grzanie — stopień 2
+label_power_pump=Pompa
+label_power_idle=Tryb czuwania
+label_power_air=AirJet
+label_power_jets=HydroJet
+
+# Test sprzętu i odnośniki serwisowe
+title_hwtest_header=Test sprzętu
+hwtest_instr1=Przygotuj przewody do połączenia, ale jeszcze ich nie łącz.
+hwtest_instr2=Podaj +5 V i GND na płytkę PCB (czerwony i czarny przewód na ilustracji). Jeśli płytka przekazuje 5 V z USB na pin Vin, możesz użyć USB. Nie używaj obu sposobów jednocześnie!
+link_hwtest=Rozpocznij test
+link_resetwifi_note=Uwaga — usuwa zapisane dane WiFi!
+link_hwtest_note=Najpierw przeczytaj instrukcję na stronie
+link_hwtest_note2=.
+link_inputs_note=Zliczanie zboczy na pinach — funkcja diagnostyczna.
+
+# MQTT
+label_enable_mqtt=Włącz MQTT:
+label_mqtt_host=Adres brokera MQTT:
+label_client_id=Identyfikator klienta:
+label_base_topic=Temat bazowy:
+label_telemetry_interval=Interwał telemetrii (s):
+
+# Sieć WiFi
+header_networkconfig=Konfiguracja sieci
+section_ap=Domowa sieć WiFi:
+label_enableAp=Użyj poniższych danych sieci:
+tooltip_enableAp=Zaznaczone: ESP połączy się przy użyciu poniższych danych. Odznaczone: użyje ostatnio zapisanej sieci.
+label_ssid=Nazwa sieci (SSID):
+section_softap=Awaryjny punkt dostępowy:
+label_enableWM=Włącz punkt konfiguracyjny po restarcie:
+tooltip_enableWM=Punkt konfiguracyjny działa tylko przez ograniczony czas po restarcie. Nie jest uruchamiany po zwykłej utracie połączenia WiFi.
+section_static_ip=Statyczny adres IP:
+label_enable_static_ip=Włącz statyczny adres IP:
+label_ip_address=Adres IP:
+tooltip_ipStatic=Pozostaw puste, aby użyć DHCP, albo wpisz prawidłowy adres IP.
+label_gateway_ip=Adres bramy:
+tooltip_gateway=Zwykle jest to adres routera. Pozostaw puste, aby użyć wartości domyślnej.
+label_subnet_mask=Maska podsieci:
+tooltip_netmask=Najczęściej 255.255.255.0. Pozostaw puste, aby użyć wartości domyślnej.
+label_dns_primary=Podstawowy serwer DNS:
+tooltip_dnsPrimary=Użyj routera lub serwera DNS operatora. Pozostaw puste, aby użyć wartości domyślnej.
+label_dns_secondary=Zapasowy serwer DNS:
+tooltip_dnsSecondary=Alternatywny serwer DNS. Pozostaw puste, jeśli nie jest potrzebny.
+section_ntp=Serwer czasu NTP:
+label_ntp_address=Nazwa domenowa lub adres IP:
+tooltip_ntpServer=Pozostaw puste, aby użyć domyślnego pool.ntp.org.
+section_rf_tuning=Ustawienia radia WiFi — zasięg i stabilność:
+label_tx_power=Moc nadawania (dBm):
+tooltip_tx_power=Moc od 0 do 20,5 dBm. Wyższa wartość zwiększa zasięg i pobór prądu. Domyślnie 20,5 dBm.
+label_no_sleep=Wyłącz usypianie modemu:
+tooltip_no_sleep=Zaznaczone: radio WiFi pracuje stale, reaguje szybciej i pobiera około 30 mA więcej.
+label_phy_mode=Tryb PHY:
+tooltip_phy_mode=Auto pozwala sterownikowi wybrać tryb. 802.11b ma najlepszą czułość przy słabym sygnale; 802.11g/n są szybsze.
+option_phy_auto=Auto (domyślnie)
+option_phy_b=Tylko 802.11b (najlepszy zasięg)
+section_reset_wifi=Usuń konfigurację WiFi:
+reset_wifi_note=Ten przycisk usuwa dane domowej sieci WiFi.<br />ESP uruchomi się ponownie i włączy własny punkt dostępowy.<br />Połącz się z siecią Lay-Z-Spa i otwórz http://192.168.4.2/wifi.html
+btn_reset_wifi=usuń dane WiFi
+
+# SUPLA Cloud
+header_suplaconfig=Konfiguracja SUPLA
+section_supla_connection=Połączenie z chmurą
+supla_setup_note=Wprowadź adres e-mail konta SUPLA Cloud. Moduł nie zapisuje hasła do konta SUPLA. Przed pierwszym połączeniem włącz rejestrację urządzeń w SUPLA Cloud. Domyślne hasło sieci WiFi ESP to layzspam0dule.
+supla_wifi_setup_note=Najpierw skonfiguruj połączenie ESP z domową siecią WiFi 2,4 GHz.
+supla_wifi_setup_link=Otwórz konfigurację sieci
+label_enable_supla=Włącz SUPLA:
+tooltip_enable_supla=Łączy moduł bezpośrednio z SUPLA Cloud. Lokalny panel WWW i integracja MQTT pozostają dostępne.
+label_supla_email=E-mail konta SUPLA:
+tooltip_supla_email=Określa konto SUPLA Cloud, do którego zostanie przypisane urządzenie. Moduł nie loguje się tym adresem do panelu użytkownika.
+placeholder_supla_email=nazwa@przyklad.pl
+placeholder_supla_email_configured=Skonfigurowano — wpisz nowy adres tylko przy zmianie konta
+label_supla_server=Serwer SUPLA:
+tooltip_supla_server=Pole opcjonalne. Pozostaw puste, aby użyć automatycznego wykrywania SUPLA Cloud. Wpisz wyłącznie nazwę hosta lub adres IP, bez https://, portu i ścieżki.
+placeholder_supla_server=Automatyczne wykrywanie (zalecane)
+section_supla_status=Stan
+label_supla_configured=Parowanie skonfigurowane:
+label_supla_wifi_configured=Domowa sieć WiFi skonfigurowana:
+label_supla_running=Klient SUPLA:
+label_supla_cloud_status=Stan chmury:
+label_supla_configuration_access=Dostęp do konfiguracji:
+label_supla_provisioning_window=Okno konfiguracji:
+supla_status_loading=Wczytywanie…
+supla_value_yes=Tak
+supla_value_no=Nie
+supla_value_running=Uruchomiony
+supla_value_stopped=Zatrzymany
+supla_value_unknown=Nieznany
+supla_value_unlocked=Odblokowana (punkt dostępowy urządzenia)
+supla_value_locked=Sieć domowa
+supla_window_remaining=Otwarte — pozostało {seconds} s
+supla_window_closed=Zamknięte
+supla_configuration_unlocked_note=Konfiguracja SUPLA jest odblokowana przez punkt dostępowy urządzenia. Okno zamknie się automatycznie.
+supla_configuration_locked_note=Ustawienia SUPLA można zmieniać bezpośrednio przez domową sieć WiFi. Punkt dostępowy ESP pozostaje awaryjną metodą konfiguracji.
+section_supla_reset=Usuń parowanie
+supla_reset_note=Usuwa przypisanie SUPLA zapisane w module i tworzy nową tożsamość urządzenia. Poprzednie urządzenie nie zostanie automatycznie usunięte z SUPLA Cloud.
+button_reset_pairing=Usuń parowanie
+supla_saving=Zapisywanie…
+supla_saved_restart=Zapisano. Urządzenie uruchamia się ponownie; w razie potrzeby połącz się ponownie.
+supla_resetting=Usuwanie parowania…
+supla_reset_done=Parowanie usunięto. Urządzenie uruchamia się ponownie; w razie potrzeby połącz się ponownie.
+supla_request_failed=Żądanie nie powiodło się. Sprawdź połączenie i spróbuj ponownie.
+supla_validation_email_required=Przed włączeniem SUPLA wprowadź adres e-mail konta.
+supla_validation_wifi_required=Przed włączeniem SUPLA skonfiguruj domową sieć WiFi.
+supla_validation_email_invalid=Wprowadź prawidłowy adres e-mail.
+supla_validation_server_invalid=Wprowadź nazwę hosta lub adres IP bez protokołu, portu, ścieżki i spacji.
+confirm_supla_reset=Usunąć parowanie SUPLA? Moduł otrzyma nową tożsamość i uruchomi się ponownie. Poprzednie urządzenie trzeba usunąć ręcznie z SUPLA Cloud.
+supla_cloud_disabled=Wyłączona
+supla_cloud_not_configured=Nieskonfigurowana
+supla_cloud_not_running=Klient nie jest uruchomiony
+supla_cloud_waiting_for_wifi=Oczekiwanie na WiFi
+supla_cloud_waiting_for_time=Synchronizacja czasu
+supla_cloud_initialized=Zainicjalizowana
+supla_cloud_server_disconnected=Rozłączono z serwerem
+supla_cloud_communication_error=Błąd komunikacji
+supla_cloud_network_disconnected=Brak połączenia sieciowego
+supla_cloud_registering=Rejestrowanie urządzenia
+supla_cloud_connected=Połączono
+supla_cloud_temporarily_unavailable=Tymczasowo niedostępna
+supla_cloud_bad_credentials=Błędne dane uwierzytelniające
+supla_cloud_device_disabled=Urządzenie wyłączone
+supla_cloud_registration_disabled=Rejestracja urządzeń jest wyłączona
+supla_cloud_missing_credentials=Brak danych uwierzytelniających
+supla_cloud_invalid_guid=Nieprawidłowy GUID
+supla_cloud_invalid_auth_key=Nieprawidłowy klucz uwierzytelniający
+supla_cloud_discovering_server=Wykrywanie serwera
+supla_cloud_device_limit_exceeded=Przekroczono limit urządzeń
+supla_cloud_channel_limit_exceeded=Przekroczono limit kanałów
+supla_cloud_protocol_version_error=Nieobsługiwana wersja protokołu
+supla_cloud_waiting=Oczekiwanie
+supla_cloud_unknown=Nieznany
+
+# Ustawienia fabryczne
+header_factory_reset=Ustawienia fabryczne
+section_factory_reset=Przywracanie ustawień fabrycznych
+factory_reset_warning=Ta operacja bezpowrotnie usunie wszystkie ustawienia i uruchomi ESP ponownie.
+factory_reset_details=Usunięte zostaną dane domowej sieci WiFi, konfiguracja MQTT i SUPLA, ustawienia sprzętowe i SPA, harmonogramy, statystyki oraz pliki robocze. Firmware i wbudowany panel WWW pozostaną zainstalowane.
+button_factory_reset=Przywróć ustawienia fabryczne
+confirm_factory_reset=Usunąć wszystkie zapisane ustawienia i uruchomić ESP ponownie? Tej operacji nie można cofnąć.
+factory_reset_working=Usuwanie ustawień…
+factory_reset_done=Ustawienia zostały usunięte. ESP uruchamia się ponownie. Połącz się z jego siecią konfiguracyjną WiFi.
+factory_reset_failed=Nie udało się przywrócić ustawień fabrycznych. Sprawdź połączenie i spróbuj ponownie.

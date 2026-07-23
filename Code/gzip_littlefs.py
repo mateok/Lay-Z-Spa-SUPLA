@@ -33,8 +33,10 @@ def copy_gzip_data(source, target, env):
   web_interface_base_dir = os.path.join(data_dir[:-4], "webInterface")
 
   print(f"creating '{data_dir}' if not exists")
-  if not os.path.exists(data_dir):
-    os.makedirs(data_dir)
+  # The source pages are authoritative. Clear the intermediate directory so a
+  # removed page cannot survive in a later LittleFS image as a stale file.
+  shutil.rmtree(data_dir, True)
+  os.makedirs(data_dir)
 
   print(f"Building web interface from {web_interface_base_dir} into {data_dir}")
   build_web_interface(data_dir, web_interface_base_dir)

@@ -30,6 +30,13 @@
 #include "enums.h"
 
 constexpr int MAXCOMMANDS = 20;
+constexpr size_t MAX_COMMAND_TEXT_LENGTH = 63;
+// Five arrays, the root object, all maximum-length texts and a conservative
+// allowance for copied JSON keys/terminators. This allocation is used only
+// while loading the queue at boot; runtime serialization is streamed.
+constexpr size_t COMMAND_QUEUE_JSON_CAPACITY =
+    JSON_OBJECT_SIZE(6) + 5 * JSON_ARRAY_SIZE(MAXCOMMANDS) +
+    MAXCOMMANDS * (MAX_COMMAND_TEXT_LENGTH + 1) + 128;
 
 struct command_que_item
 {
@@ -38,6 +45,88 @@ struct command_que_item
     Commands cmd;
     uint32_t interval;
     String text = "";
+};
+
+enum class SpaReadyState : uint8_t
+{
+    UNKNOWN,
+    NOT_READY,
+    READY,
+    NEVER
+};
+
+struct SpaCapabilities
+{
+    bool hasHeater = true;
+    bool hasFilterPump = true;
+    bool hasBubbles = false;
+    bool hasJets = false;
+    bool hasGodMode = false;
+    bool supportsPowerControl = false;
+    bool hasAmbientTemperatureSensor = false;
+};
+
+/**
+ * Transport-independent snapshot of the SPA state.
+ *
+ * All temperatures are expressed in degrees Celsius, regardless of the unit
+ * selected on the physical display. Energy figures are estimates based on the
+ * configured component power levels, just like the existing JSON/MQTT data.
+ */
+struct SpaSnapshot
+{
+    uint64_t timestampSeconds = 0;
+    Models cioModel = PRE2021;
+    Models dspModel = PRE2021;
+    SpaCapabilities capabilities;
+
+    bool locked = false;
+    bool power = false;
+    bool displayUnitCelsius = true;
+    bool bubbles = false;
+    bool heaterEnabled = false;
+    bool heaterActive = false;
+    bool heaterStandby = false;
+    bool filterPump = false;
+    bool jets = false;
+    bool godMode = false;
+    uint8_t error = 0;
+    uint8_t brightness = 0;
+    uint8_t heaterElements = 0;
+
+    float waterTemperatureC = 0.0f;
+    float targetTemperatureC = 0.0f;
+    float virtualTemperatureC = 0.0f;
+    float ambientTemperatureC = 0.0f;
+
+    uint32_t chlorineTimestampSeconds = 0;
+    uint32_t filterReplaceTimestampSeconds = 0;
+    uint32_t filterCleanTimestampSeconds = 0;
+    uint32_t filterRinseTimestampSeconds = 0;
+    double chlorineAgeDays = 0.0;
+    double filterReplaceAgeDays = 0.0;
+    double filterCleanAgeDays = 0.0;
+    double filterRinseAgeDays = 0.0;
+    uint32_t chlorineIntervalDays = 0;
+    uint32_t filterReplaceIntervalDays = 0;
+    uint32_t filterCleanIntervalDays = 0;
+    uint32_t filterRinseIntervalDays = 0;
+
+    uint64_t uptimeSeconds = 0;
+    uint64_t filterPumpTimeSeconds = 0;
+    uint64_t heatingTimeSeconds = 0;
+    uint64_t bubblesTimeSeconds = 0;
+    uint64_t jetsTimeSeconds = 0;
+
+    int powerWatts = 0;
+    double energyTotalKWh = 0.0;
+    double energyTodayKWh = 0.0;
+    float electricityPrice = 0.0f;
+    double energyCostTotal = 0.0;
+    double energyCostToday = 0.0;
+
+    float timeToReadyHours = -1.0f;
+    SpaReadyState readyState = SpaReadyState::UNKNOWN;
 };
         
 
@@ -69,6 +158,7 @@ class BWC {
         void getJSONSettings(String &rtn);
         void setJSONSettings(const String& message);
         String getJSONCommandQueue();
+        bool writeJSONCommandQueue(Print& output) const;
         uint8_t getState(int state);
         // void saveSettingsFlag();
         void saveSettings();
@@ -84,6 +174,8 @@ class BWC {
         void print(const String& txt);
         void loadCommandQueue();
         void restoreStates();
+        bool getSnapshot(SpaSnapshot& snapshot) const;
+        bool enqueueImmediate(Commands cmd, int64_t val);
 
         // String getDebugData();
 
@@ -109,7 +201,7 @@ class BWC {
         void _saveCommandQueue();
         void _updateTimes();
         void _saveStates();
-        float _estHeatingTime();
+        float _estHeatingTime() const;
         void _calcVirtualTemp();
         void _updateVirtualTempFix_ontempchange();
         void _updateVirtualTempFix_onheaterchange();
@@ -184,6 +276,9 @@ class BWC {
         bool _notify;
         bool _vt_calibrated = false;
         bool _states_are_restored = false;
+        Models _cio_model = PRE2021;
+        Models _dsp_model = PRE2021;
+        bool _supports_power_control = false;
 };
 
 void save_settings_cb(BWC *bwcInstance);

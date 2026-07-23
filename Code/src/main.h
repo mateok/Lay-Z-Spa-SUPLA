@@ -26,6 +26,7 @@
 #include <umm_malloc/umm_heap_select.h>
 
 #include "bwc.h"
+#include "SuplaSpaBridge.h"
 #include "config.h"
 #include "util.h"
 #include "bwc_debug.h"
@@ -42,6 +43,7 @@ Ticker *updateMqttTimer;
 
 /**  ...Hence these flags to do the work in normal context*/
 bool periodicTimerFlag = false;
+volatile bool restoreStatesFlag = false;
 bool checkNTP_flag = false;
 bool sendWSFlag = false;
 bool sendMQTTFlag = false;
@@ -51,9 +53,6 @@ bool disconnected_flag = false;
 
 int periodicTimerInterval = 60;
 sWifi_info *wifi_info;
-
-/** A file to store the uploads */
-File fsUploadFile;
 
 /** a webserver object that listens on port 80 */
 #if defined(ESP8266)
@@ -69,6 +68,9 @@ WebSocketsServer *webSocket = nullptr;
 WiFiClient *aWifiClient = nullptr;
 /** a MQTT client */
 PubSubClient *mqttClient = nullptr;
+
+/** Optional SUPLA Cloud bridge. Created only for a valid, enabled config. */
+SuplaSpaBridge *suplaBridge = nullptr;
 /**  */
 // bool checkMqttConnection = false;
 
@@ -115,13 +117,13 @@ void handleAddCommand();
 void handleEditCommand();
 void handleDelCommand();
 void handle_cmdq_file();
-void copyFile(String source, String dest);
+bool copyFile(const String &source, const String &dest);
 void loadWebConfig();
 void saveWebConfig();
 void handleGetWebConfig();
 void handleSetWebConfig();
 void loadWifi();
-void saveWifi();
+bool saveWifi();
 void handleGetWifi();
 void handleSetWifi();
 void handleResetWifi();
@@ -130,9 +132,13 @@ void loadMqtt();
 void saveMqtt();
 void handleGetMqtt();
 void handleSetMqtt();
-void handleDir();
-void handleFileUpload();
-void handleFileRemove();
+void loadSupla();
+bool saveSupla();
+void startSupla();
+void handleGetSupla();
+void handleSetSupla();
+void handleResetSupla();
+void handleFactoryReset();
 void handleRestart();
 void updateStart();
 void updateEnd();
@@ -143,6 +149,7 @@ void mqttCallback(char *topic, byte *payload, unsigned int length);
 void mqttConnect();
 time_t getBootTime();
 void handleESPInfo();
+void handleHealth();
 void setTemperatureFromSensor();
 void setupHA();
 void handlePrometheusMetrics();

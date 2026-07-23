@@ -13,9 +13,9 @@
 
 <section onclick="setPins()">
     <p data-i18n="label_select_cio">Select your CIO (pump) model:</p>
-    <input type="radio" id="cio_0" name="cio_model" value="0" checked="checked">
+    <input type="radio" id="cio_0" name="cio_model" value="0">
     <label for="cio_pre2021" data-i18n="option_cio_pre2021">6 wire, pre 2021 (air)</label><br>
-    <input type="radio" id="cio_1" name="cio_model" value="1">
+    <input type="radio" id="cio_1" name="cio_model" value="1" checked="checked">
     <label for="cio_2021" data-i18n="option_cio_2021">6 wire, 2021 (air)</label><br>
     <input type="radio" id="cio_2" name="cio_model" value="2">
     <label for="cio_2021hjt" data-i18n="option_cio_2021hjt">6 wire, 2021 (air+jet)</label><br>
@@ -35,9 +35,9 @@
 
 <section onclick="setPins()">
     <p data-i18n="label_select_dsp">Select your DSP (display) model:</p>
-    <input type="radio" id="dsp_0" name="dsp_model" value="0" checked="checked">
+    <input type="radio" id="dsp_0" name="dsp_model" value="0">
     <label for="dsp_pre2021" data-i18n="option_dsp_pre2021">6 wire, pre 2021 (air)</label><br>
-    <input type="radio" id="dsp_1" name="dsp_model" value="1">
+    <input type="radio" id="dsp_1" name="dsp_model" value="1" checked="checked">
     <label for="dsp_2021" data-i18n="option_dsp_2021">6 wire, 2021 (air)</label><br>
     <input type="radio" id="dsp_2" name="dsp_model" value="2">
     <label for="dsp_2021hjt" data-i18n="option_dsp_2021hjt">6 wire, 2021 (air+jet)</label><br>
@@ -57,7 +57,7 @@
 
 <section onclick="setPins()">
     <p data-i18n="label_select_pcb">Select your PCB:</p>
-    <input type="radio" id="v1" name="pcb" value="v1" checked="checked">
+    <input type="radio" id="v1" name="pcb" value="v1">
     <label for="v1" data-i18n="option_pcb_v1">V1</label><br>
     <input type="radio" id="v2" name="pcb" value="v2">
     <label for="v2" data-i18n="option_pcb_v2">V2</label><br>
@@ -70,7 +70,7 @@
         ?
     </span><br>
 
-    <input type="radio" id="custom" name="pcb" value="custom">
+    <input type="radio" id="custom" name="pcb" value="custom" checked="checked">
     <label for="custom" data-i18n="option_pcb_custom">Custom</label>
     <span data-i18n="[data-text]tooltip_pcb_custom_info" class="tooltip"
         data-text="If you're using your own board, fill out the pinout below! Leave fields blank if not used.">
@@ -209,7 +209,7 @@
         var dsp = document.querySelector("input[name='dsp_model']:checked").value
         var pcb = document.querySelector("input[name='pcb']:checked").value
         var p1, p2, p3, p4, p5, p6, p7, p8
-        p8 = null
+        p8 = 8
 
         switch (pcb) {
             case 'v1':
@@ -254,6 +254,10 @@
                     p4 = 4; p5 = 3; p6 = null; p7 = null
                 }
                 break
+            case 'custom':
+                p1 = 4; p2 = 3; p3 = 2
+                p4 = 7; p5 = 6; p6 = 5; p7 = 0
+                break
             default:
                 return
         }
@@ -265,7 +269,7 @@
         document.getElementById('pin6').value = p6
         document.getElementById('pin7').value = p7
 
-        if (document.getElementById('pin8').value === undefined || p8 !== null) {
+        if (!document.getElementById('pin8').value || p8 !== null) {
             document.getElementById('pin8').value = p8
         }
     }
@@ -322,7 +326,7 @@
 
     function saveHardwareConfig() {
         console.log("Sending sethardware request")
-        buttonConfirm(document.getElementById('save'), "saved &check; (Don't forget to restart the ESP.)", 6)
+        buttonConfirm(document.getElementById('save'), getTranslation('hardware_saved_restart_note'), 6)
         var hasTempSensor = "0"
         if (document.querySelector("input[name='hasTempSensor']").checked) {
             hasTempSensor = "1"

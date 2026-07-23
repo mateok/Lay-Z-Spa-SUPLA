@@ -2,6 +2,118 @@
 #include "util.h"
 #include "pitches.h"
 #include <algorithm>
+#include <limits>
+
+namespace
+{
+uint64_t nextRecurringTimestamp(uint64_t scheduled,
+                                uint32_t interval,
+                                uint64_t now)
+{
+    if(interval == 0 || scheduled > now) return scheduled;
+
+    const uint64_t steps = (now - scheduled) / interval + 1ULL;
+    if(steps > (std::numeric_limits<uint64_t>::max() - scheduled) / interval)
+        return now <= std::numeric_limits<uint64_t>::max() - interval
+            ? now + interval
+            : std::numeric_limits<uint64_t>::max();
+    return scheduled + steps * interval;
+}
+
+void normalizeCommandText(String& text)
+{
+    if(text.length() > MAX_COMMAND_TEXT_LENGTH)
+        text.remove(MAX_COMMAND_TEXT_LENGTH);
+    for(size_t i = 0; i < text.length(); ++i)
+        if(static_cast<uint8_t>(text[i]) < 0x20) text.setCharAt(i, ' ');
+}
+
+void writeJsonString(Print& output, const String& value)
+{
+    output.write('"');
+    for(size_t i = 0; i < value.length(); ++i)
+    {
+        const char c = value[i];
+        if(c == '"' || c == '\\') output.write('\\');
+        output.write(static_cast<uint8_t>(c));
+    }
+    output.write('"');
+}
+
+bool writeCommandQueueJson(Print& output,
+                           const std::vector<command_que_item>& queue)
+{
+    output.print(F("{\"LEN\":"));
+    output.print(queue.size());
+
+    output.print(F(",\"CMD\":["));
+    for(size_t i = 0; i < queue.size(); ++i)
+    {
+        if(i) output.write(',');
+        output.print(static_cast<unsigned int>(queue[i].cmd));
+    }
+
+    output.print(F("],\"VALUE\":["));
+    for(size_t i = 0; i < queue.size(); ++i)
+    {
+        if(i) output.write(',');
+        output.print(static_cast<long long>(queue[i].val));
+    }
+
+    output.print(F("],\"XTIME\":["));
+    for(size_t i = 0; i < queue.size(); ++i)
+    {
+        if(i) output.write(',');
+        output.print(static_cast<unsigned long long>(queue[i].xtime));
+    }
+
+    output.print(F("],\"INTERVAL\":["));
+    for(size_t i = 0; i < queue.size(); ++i)
+    {
+        if(i) output.write(',');
+        output.print(queue[i].interval);
+    }
+
+    output.print(F("],\"TXT\":["));
+    for(size_t i = 0; i < queue.size(); ++i)
+    {
+        if(i) output.write(',');
+        writeJsonString(output, queue[i].text);
+    }
+    output.print(F("]}"));
+    return output.getWriteError() == 0;
+}
+
+class StringPrint final : public Print
+{
+    public:
+        explicit StringPrint(String& destination) : destination_(destination) {}
+
+        size_t write(uint8_t value) override
+        {
+            if(!destination_.concat(static_cast<char>(value)))
+            {
+                setWriteError();
+                return 0;
+            }
+            return 1;
+        }
+
+        size_t write(const uint8_t* buffer, size_t size) override
+        {
+            if(buffer == nullptr || size == 0) return 0;
+            if(!destination_.concat(reinterpret_cast<const char*>(buffer), size))
+            {
+                setWriteError();
+                return 0;
+            }
+            return size;
+        }
+
+    private:
+        String& destination_;
+};
+} // namespace
 
 BWC::BWC()
 {
@@ -59,21 +171,32 @@ void BWC::on_scroll_text()
 void BWC::setup(void){
     if(cio != nullptr) delete cio;
     if(dsp != nullptr) delete dsp;
-    Models ciomodel;
-    Models dspmodel;
+    const sHW_config_eeprom_t factoryHardware = makeDefaultHardwareConfig();
+    Models ciomodel = factoryHardware.cioNo;
+    Models dspmodel = factoryHardware.dspNo;
     std::optional<Power> power_levels = {};
     
     if(!_loadHardware(ciomodel, dspmodel, pins, power_levels)){
-        pins[0] = D1;
-        pins[1] = D2;
-        pins[2] = D3;
-        pins[3] = D4;
-        pins[4] = D5;
-        pins[5] = D6;
-        pins[6] = D7;
-        pins[7] = D8;
-        
+        // CIO {D4,D3,D2}, DSP {D7,D6,D5,D0}; D8 is reserved for the
+        // optional ambient-temperature sensor and remains disabled by default.
+        const int DtoGPIO[] = {D0, D1, D2, D3, D4, D5, D6, D7, D8};
+        for(size_t i = 0; i < 8; ++i)
+            pins[i] = DtoGPIO[factoryHardware.pins[i]];
+        pcb = factoryHardware.pcbname;
+        hasTempSensor = factoryHardware.hasTempSensor;
+
+        EEPROM.begin(EEPROM_CONFIG_SIZE);
+        EEPROM.put(HW_CONFIG_EEPROM_OFFSET, factoryHardware);
+        const bool defaultsSaved = EEPROM.commit();
+        EEPROM.end();
+        BWC_LOG_P(PSTR("BWC > factory hardware config persisted: %s\n"),
+                  defaultsSaved ? "yes" : "no");
     }
+    _cio_model = ciomodel;
+    _dsp_model = dspmodel;
+    _supports_power_control = ciomodel == PRE2021 ||
+                              ciomodel == MIAMI2021 ||
+                              ciomodel == MALDIVES2021;
     // Serial.printf("Cio loaded: %d, dsp model: %d\n", ciomodel, dspmodel);
     for(int i = 0; i < 8; i++)
     {
@@ -434,10 +557,12 @@ void BWC::_handleCommandQ() {
     //If interval > 0 then append to commandQ with updated xtime.
     if(_command_que[0].interval > 0)
     {
-        // while(_command_que[0].xtime < (uint64_t)time(nullptr))
-        while(_command_que[0].xtime <= _timestamp_secs)
-            _command_que[0].xtime += _command_que[0].interval;
-       _command_que.push_back(_command_que[0]);
+        // Advance in constant time. Repeated incrementing can run for billions
+        // of iterations after NTP corrects an ESP clock that started at epoch.
+        _command_que[0].xtime = nextRecurringTimestamp(_command_que[0].xtime,
+                                                       _command_que[0].interval,
+                                                       _timestamp_secs);
+        _command_que.push_back(_command_que[0]);
     } 
     _handlecommand(_command_que[0].cmd, _command_que[0].val, _command_que[0].text);
 }
@@ -736,7 +861,7 @@ void BWC::_handleStateChanges()
 }
 
 // return how many hours until pool is ready. (provided the heater is on)
-float BWC::_estHeatingTime()
+float BWC::_estHeatingTime() const
 {
     int targetInC = cio->cio_states.target;
     if(!cio->cio_states.unit) targetInC = F2C(targetInC);
@@ -927,8 +1052,96 @@ String BWC::getModel()
     return cio->getModel();
 }
 
+bool BWC::getSnapshot(SpaSnapshot& snapshot) const
+{
+    if(cio == nullptr || dsp == nullptr) return false;
+
+    SpaSnapshot result;
+    const sStates& state = cio->cio_states;
+    const bool unit_is_celsius = state.unit != 0;
+    const uint64_t now = _timestamp_secs;
+
+    result.timestampSeconds = now;
+    result.cioModel = _cio_model;
+    result.dspModel = _dsp_model;
+    result.capabilities.hasBubbles = cio->getHasair();
+    result.capabilities.hasJets = cio->getHasjets();
+    result.capabilities.hasGodMode = cio->getHasgod();
+    result.capabilities.supportsPowerControl = _supports_power_control;
+    result.capabilities.hasAmbientTemperatureSensor = hasTempSensor;
+
+    result.locked = state.locked != 0;
+    result.power = state.power != 0;
+    result.displayUnitCelsius = unit_is_celsius;
+    result.bubbles = state.bubbles != 0;
+    result.heaterEnabled = state.heat != 0;
+    result.heaterActive = state.heatred != 0;
+    result.heaterStandby = state.heatgrn != 0;
+    result.filterPump = state.pump != 0;
+    result.jets = state.jets != 0;
+    result.godMode = state.godmode;
+    result.error = state.error;
+    result.brightness = dsp->dsp_states.brightness;
+    result.heaterElements = state.no_of_heater_elements_on;
+
+    result.waterTemperatureC = unit_is_celsius
+        ? static_cast<float>(state.temperature)
+        : F2C(static_cast<float>(state.temperature));
+    result.targetTemperatureC = unit_is_celsius
+        ? static_cast<float>(state.target)
+        : F2C(static_cast<float>(state.target));
+    result.virtualTemperatureC = _virtual_temp;
+    result.ambientTemperatureC = static_cast<float>(_ambient_temp);
+
+    result.chlorineTimestampSeconds = _cl_timestamp_s;
+    result.filterReplaceTimestampSeconds = _filter_replace_timestamp_s;
+    result.filterCleanTimestampSeconds = _filter_clean_timestamp_s;
+    result.filterRinseTimestampSeconds = _filter_rinse_timestamp_s;
+
+    const auto age_days = [now](uint32_t timestamp) -> double
+    {
+        if(timestamp == 0 || now < timestamp) return 0.0;
+        return static_cast<double>(now - timestamp) / 86400.0;
+    };
+    result.chlorineAgeDays = age_days(_cl_timestamp_s);
+    result.filterReplaceAgeDays = age_days(_filter_replace_timestamp_s);
+    result.filterCleanAgeDays = age_days(_filter_clean_timestamp_s);
+    result.filterRinseAgeDays = age_days(_filter_rinse_timestamp_s);
+    result.chlorineIntervalDays = _cl_interval;
+    result.filterReplaceIntervalDays = _filter_replace_interval;
+    result.filterCleanIntervalDays = _filter_clean_interval;
+    result.filterRinseIntervalDays = _filter_rinse_interval;
+
+    result.uptimeSeconds = static_cast<uint64_t>(_uptime) + _uptime_ms / 1000ULL;
+    result.filterPumpTimeSeconds = static_cast<uint64_t>(_pumptime) + _pumptime_ms / 1000ULL;
+    result.heatingTimeSeconds = static_cast<uint64_t>(_heatingtime) + _heatingtime_ms / 1000ULL;
+    result.bubblesTimeSeconds = static_cast<uint64_t>(_airtime) + _airtime_ms / 1000ULL;
+    result.jetsTimeSeconds = static_cast<uint64_t>(_jettime) + _jettime_ms / 1000ULL;
+
+    result.powerWatts = _energy_power_W;
+    result.energyTotalKWh = _energy_total_Ws / 3600000.0;
+    result.energyTodayKWh = _energy_daily_Ws / 3600000.0;
+    result.electricityPrice = _price;
+    result.energyCostTotal = _energy_cost_total;
+    result.energyCostToday = _energy_cost_daily;
+
+    result.timeToReadyHours = _estHeatingTime();
+    if(result.timeToReadyHours == -2.0f)
+        result.readyState = SpaReadyState::READY;
+    else if(result.timeToReadyHours == -1.0f)
+        result.readyState = SpaReadyState::NEVER;
+    else if(result.timeToReadyHours >= 0.0f)
+        result.readyState = SpaReadyState::NOT_READY;
+
+    snapshot = result;
+    return true;
+}
+
 bool BWC::add_command(command_que_item command_item)
 {
+    if(command_item.cmd < SETTARGET || command_item.cmd > SETPOWER) return false;
+    if(_command_que.size() >= static_cast<size_t>(MAXCOMMANDS)) return false;
+    normalizeCommandText(command_item.text);
     _save_cmdq_needed = true;
     if(command_item.cmd == SETREADY)
     {
@@ -943,9 +1156,147 @@ bool BWC::add_command(command_que_item command_item)
     return true;
 }
 
+bool BWC::enqueueImmediate(Commands cmd, int64_t val)
+{
+    if(cmd < SETTARGET || cmd == SETREADY || cmd > SETPOWER) return false;
+
+    int64_t normalized_val = val;
+    switch(cmd)
+    {
+        case SETUNIT:
+        case SETBUBBLES:
+        case SETHEATER:
+        case SETPUMP:
+        case SETJETS:
+        case SETGODMODE:
+        case SETFULLPOWER:
+        case SETPOWER:
+            normalized_val = val != 0 ? 1 : 0;
+            break;
+        case SETTARGET:
+            if(!((val > 0 && val < 41) || (val > 50 && val < 105))) return false;
+            break;
+        case SETBRIGHTNESS:
+            if(val < 0 || val > 8) return false;
+            break;
+        default:
+            break;
+    }
+
+    bool state_known = cio != nullptr;
+    bool state_satisfied = false;
+    if(state_known)
+    {
+        const sStates& state = cio->cio_states;
+        switch(cmd)
+        {
+            case SETTARGET:
+            {
+                const bool requested_unit_is_celsius = normalized_val < 41;
+                int requested_target = static_cast<int>(normalized_val);
+                if(requested_unit_is_celsius && !state.unit)
+                    requested_target = round(C2F(static_cast<float>(normalized_val)));
+                else if(!requested_unit_is_celsius && state.unit)
+                    requested_target = round(F2C(static_cast<float>(normalized_val)));
+                state_satisfied = requested_target == state.target;
+                break;
+            }
+            case SETUNIT:
+                state_satisfied = normalized_val == state.unit;
+                break;
+            case SETBUBBLES:
+                state_satisfied = normalized_val == state.bubbles;
+                break;
+            case SETHEATER:
+                state_satisfied = normalized_val == state.heat;
+                break;
+            case SETPUMP:
+                state_satisfied = normalized_val == state.pump;
+                break;
+            case SETJETS:
+                state_satisfied = normalized_val == state.jets;
+                break;
+            case SETBRIGHTNESS:
+                state_satisfied = normalized_val == _dsp_brightness;
+                break;
+            case SETAMBIENTF:
+                state_satisfied = static_cast<int>(F2C(static_cast<float>(normalized_val))) == _ambient_temp;
+                break;
+            case SETAMBIENTC:
+                state_satisfied = static_cast<int>(normalized_val) == _ambient_temp;
+                break;
+            case SETGODMODE:
+                state_satisfied = (normalized_val != 0) == state.godmode;
+                break;
+            case SETFULLPOWER:
+                state_satisfied = normalized_val + 1 == state.no_of_heater_elements_on;
+                break;
+            case SETPOWER:
+                state_satisfied = normalized_val == state.power;
+                break;
+            default:
+                state_known = false;
+                break;
+        }
+    }
+
+    const auto is_same_immediate = [cmd](const command_que_item& item)
+    {
+        return item.cmd == cmd && item.xtime == 0 && item.interval == 0;
+    };
+
+    if(state_known && state_satisfied)
+    {
+        const size_t previous_size = _command_que.size();
+        _command_que.erase(
+            std::remove_if(_command_que.begin(), _command_que.end(), is_same_immediate),
+            _command_que.end());
+        if(_command_que.size() != previous_size) _save_cmdq_needed = true;
+        return true;
+    }
+
+    bool command_updated = false;
+    for(auto it = _command_que.begin(); it != _command_que.end();)
+    {
+        if(!is_same_immediate(*it))
+        {
+            ++it;
+            continue;
+        }
+
+        if(!command_updated)
+        {
+            it->val = normalized_val;
+            it->text = "";
+            command_updated = true;
+            ++it;
+        }
+        else
+        {
+            it = _command_que.erase(it);
+        }
+    }
+
+    if(command_updated)
+    {
+        _save_cmdq_needed = true;
+        return true;
+    }
+
+    command_que_item item;
+    item.cmd = cmd;
+    item.val = normalized_val;
+    item.xtime = 0;
+    item.interval = 0;
+    item.text = "";
+    return add_command(item);
+}
+
 bool BWC::edit_command(uint8_t index, command_que_item command_item)
 {
-    if(index > _command_que.size()) return false;
+    if(index >= _command_que.size() ||
+       command_item.cmd < SETTARGET || command_item.cmd > SETPOWER) return false;
+    normalizeCommandText(command_item.text);
     _save_cmdq_needed = true;
     if(command_item.cmd == SETREADY)
     {
@@ -1146,25 +1497,27 @@ void BWC::getJSONSettings(String &rtn){
     BWC_YIELD;
 }
 
+bool BWC::writeJSONCommandQueue(Print& output) const
+{
+    return writeCommandQueueJson(output, _command_que);
+}
+
 String BWC::getJSONCommandQueue(){
     //feed the dog
     #ifdef ESP8266
     ESP.wdtFeed();
     #endif
-    DynamicJsonDocument doc(8192);
-    // Set the values in the document
-    doc[F("LEN")] = _command_que.size();
-    for(unsigned int i = 0; i < _command_que.size(); i++){
-        doc[F("CMD")][i] = _command_que[i].cmd;
-        doc[F("VALUE")][i] = _command_que[i].val;
-        doc[F("XTIME")][i] = _command_que[i].xtime;
-        doc[F("INTERVAL")][i] = _command_que[i].interval;
-        doc[F("TXT")][i] = _command_que[i].text;
+    String jsonmsg;
+    size_t required = 128 + _command_que.size() * 80;
+    for(const auto& item : _command_que) required += item.text.length() * 2;
+    if(!jsonmsg.reserve(required))
+    {
+        jsonmsg = F("{\"error\":\"Not enough memory for command queue\"}");
+        return jsonmsg;
     }
 
-    // Serialize JSON to file
-    String jsonmsg;
-    if (serializeJson(doc, jsonmsg) == 0) {
+    StringPrint output(jsonmsg);
+    if(!writeJSONCommandQueue(output)) {
         jsonmsg = F("{\"error\": \"Failed to serialize cmdq\"}");
     }
     BWC_YIELD;
@@ -1368,12 +1721,12 @@ bool BWC::_loadHardware(Models& cioNo, Models& dspNo, int pins[], std::optional<
     BWC_YIELD;
 
     sHW_config_eeprom_t hwcfg;
-    EEPROM.begin(sizeof(sWifi_info_eeprom_t)+sizeof(sMQTT_info_eeprom_t)+sizeof(sHW_config_eeprom_t));
-    EEPROM.get(sizeof(sWifi_info_eeprom_t)+sizeof(sMQTT_info_eeprom_t), hwcfg);
+    EEPROM.begin(EEPROM_CONFIG_SIZE);
+    EEPROM.get(HW_CONFIG_EEPROM_OFFSET, hwcfg);
     EEPROM.end();
-    if(*(uint32_t*)(hwcfg.tag) != 0x46435748) // "HWCF" in ascii (backwards)
+    if(!isValidHardwareConfig(hwcfg))
     {
-        BWC_LOG_P(PSTR("No valid hwcfg in EEPROM"),0);
+        BWC_LOG_P(PSTR("No valid hwcfg in EEPROM\n"),0);
         return false;
     }
     cioNo = (Models)hwcfg.cioNo;
@@ -1543,7 +1896,7 @@ void BWC::loadCommandQueue(){
         return;
     }
 
-    DynamicJsonDocument doc(8192);
+    DynamicJsonDocument doc(COMMAND_QUEUE_JSON_CAPACITY);
     // Deserialize the JSON document
     DeserializationError error = deserializeJson(doc, file);
     if (error) {
@@ -1552,16 +1905,28 @@ void BWC::loadCommandQueue(){
         return;
     }
     _command_que.clear();
+    int stored_command_count = doc[F("LEN")] | 0;
+    if(stored_command_count < 0) stored_command_count = 0;
+    const int commands_to_load = std::min(stored_command_count, MAXCOMMANDS);
+    if(stored_command_count > MAXCOMMANDS) _save_cmdq_needed = true;
     // Set the values in the variables
-    for(int i = 0; i < doc[F("LEN")]; i++){
+    const uint64_t now = static_cast<uint64_t>(time(nullptr));
+    for(int i = 0; i < commands_to_load; i++){
+        const int rawCommand = doc[F("CMD")][i] | -1;
+        if(rawCommand < SETTARGET || rawCommand > SETPOWER)
+        {
+            _save_cmdq_needed = true;
+            continue;
+        }
         command_que_item item;
-        item.cmd = doc[F("CMD")][i];
+        item.cmd = static_cast<Commands>(rawCommand);
         item.val = doc[F("VALUE")][i];
         item.xtime = doc[F("XTIME")][i];
         item.interval = doc[F("INTERVAL")][i];
         String s = doc[F("TXT")][i] | "";
+        normalizeCommandText(s);
         item.text = s;
-        while((item.interval > 0) && (item.xtime < (uint64_t)time(nullptr))) item.xtime += item.interval;
+        item.xtime = nextRecurringTimestamp(item.xtime, item.interval, now);
         _command_que.push_back(item);
     }
     file.close();
@@ -1633,6 +1998,12 @@ void BWC::_saveCommandQueue(){
     #ifdef ESP8266
     ESP.wdtFeed();
     #endif
+    /*Do not persist an instant reboot command. Don't ask the original author
+      how they know; importantly, check before opening/truncating the file.*/
+    if(_command_que.size() &&
+       _command_que[0].cmd == REBOOTESP && _command_que[0].interval == 0)
+        return;
+
     File file = LittleFS.open(F("cmdq.json"), "w");
     if (!file) {
         BWC_LOG_P(PSTR("Failed to save cmdq.json\n"),0);
@@ -1640,29 +2011,10 @@ void BWC::_saveCommandQueue(){
     } else {
         BWC_LOG_P(PSTR("Writing cmdq.json\n"),0);
     }
-    /*Do not save instant reboot command. Don't ask me how I know.*/
-    if(_command_que.size())
-        if(_command_que[0].cmd == REBOOTESP && _command_que[0].interval == 0) return;
-    DynamicJsonDocument doc(8192);
-
-    // Set the values in the document
-    doc[F("LEN")] = _command_que.size();
-    for(unsigned int i = 0; i < _command_que.size(); i++){
-        doc[F("CMD")][i] = _command_que[i].cmd;
-        doc[F("VALUE")][i] = _command_que[i].val;
-        doc[F("XTIME")][i] = _command_que[i].xtime;
-        doc[F("INTERVAL")][i] = _command_que[i].interval;
-        doc[F("TXT")][i] = _command_que[i].text;
-    }
-    // Serialize JSON to file
-    size_t err = serializeJson(doc, file);
-    if (err == 0) {
-        // BWC_LOG_P(PSTR("\nFailed to serialize cmdq.json\n"),0);
-    } else {
-        // BWC_LOG_P(PSTR("%s\n"),s.c_str());
-    }
-
+    const bool written = writeCommandQueueJson(file, _command_que);
+    file.flush();
     file.close();
+    if(!written) BWC_LOG_P(PSTR("Failed to serialize cmdq.json\n"),0);
     BWC_YIELD;
 }
 
