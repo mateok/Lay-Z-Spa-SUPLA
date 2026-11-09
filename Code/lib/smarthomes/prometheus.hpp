@@ -1,4 +1,6 @@
 #include <Arduino.h>
+#include <memory>
+#include <new>
 #include "ArduinoJson.h"
 #include "config.h"
 #include "main.h"
@@ -13,8 +15,13 @@
  */
 void handlePrometheusMetrics()
 {
-size_t const BUFSIZE = 2048;
-char response[BUFSIZE];
+constexpr size_t BUFSIZE = 2048;
+std::unique_ptr<char[]> response(new (std::nothrow) char[BUFSIZE]);
+if(!response)
+{
+  server->send(503, F("text/plain"), F("Not enough memory for metrics."));
+  return;
+}
 char const *response_template =
   PSTR("# HELP " PROM_NAMESPACE "_info Metadata about the device.\n"
   "# TYPE " PROM_NAMESPACE "_info gauge\n"
@@ -57,7 +64,7 @@ char const *response_template =
   "# UNIT " PROM_NAMESPACE "_unit_state\n"
   PROM_NAMESPACE "_unit_state %d\n");
 
-  snprintf_P(response, BUFSIZE, response_template, FW_VERSION, DEVICE_NAME,
+  const int length = snprintf_P(response.get(), BUFSIZE, response_template, FW_VERSION, DEVICE_NAME,
             bwc->cio->cio_states.temperature,
             bwc->cio->cio_states.target,
             bwc->cio->cio_states.heat,
@@ -67,5 +74,12 @@ char const *response_template =
             bwc->cio->cio_states.power,
             bwc->cio->cio_states.locked,
             bwc->cio->cio_states.unit);
-  server->send(200, F("text/plain; charset=utf-8"), response);
+  if(length < 0 || static_cast<size_t>(length) >= BUFSIZE)
+  {
+    server->send(500, F("text/plain"), F("Metrics response is too large."));
+    return;
+  }
+  server->setContentLength(length);
+  server->send(200, F("text/plain; charset=utf-8"), "");
+  server->sendContent(response.get(), length);
 }

@@ -1,9 +1,12 @@
 #include "main.h"
+#include "crash_summary.h"
 #include "ports.h"
 #include "web_update_page.h"
 
 #include <algorithm>
 #include <cstring>
+#include <memory>
+#include <new>
 #include <Updater.h>
 #include <flash_hal.h>
 
@@ -239,7 +242,8 @@ bool isProtectedStoragePath(String path)
     // EEPROM-backed credentials, so never expose them through the generic
     // file browser.
     if (path == F("/mqtt.json") || path == F("/wifi.json") ||
-        path == F("/crashlog.txt") || path == F("/debugoutput.txt") ||
+        path == F("/crashlog.txt") || path == F("/crash-summary.bin") ||
+        path == F("/crash-summary.tmp") || path == F("/debugoutput.txt") ||
         path == F("/debug.txt") || path == F("/log.txt") ||
         path == F("/bootlog.txt"))
         return true;
@@ -474,6 +478,8 @@ void removeKnownMutableLittleFsFiles()
         "/mqtt.json",
         "/hwcfg.json",
         "/crashlog.txt",
+        "/crash-summary.bin",
+        "/crash-summary.tmp",
         "/debugoutput.txt",
         "/debug.txt",
         "/log.txt",
@@ -913,7 +919,10 @@ void setup()
     gotIpEventHandler = WiFi.onStationModeGotIP(cb_gotIP);
     disconnectedEventHandler = WiFi.onStationModeDisconnected(cb_disconnected);
 
-    LittleFS.begin();
+    const bool filesystemMounted = LittleFS.begin();
+#ifdef ESP8266
+    CrashDiagnostics::begin(filesystemMounted);
+#endif
     {
         HeapSelectIram ephemeral;
         bwc = new BWC;
@@ -1192,7 +1201,7 @@ void sendWS()
 
 void getOtherInfo(String &rtn)
 {
-    StaticJsonDocument<512> doc;
+    DynamicJsonDocument doc(512);
     // Set the values in the document
     doc[F("CONTENT")] = F("OTHER");
     doc[F("MQTT")] = mqttClient->state();
@@ -1210,7 +1219,7 @@ void getOtherInfo(String &rtn)
     bwc->loop_count = 0;
 
     // Serialize JSON to string
-    if (serializeJson(doc, rtn) == 0)
+    if (doc.overflowed() || serializeJson(doc, rtn) == 0)
     {
         rtn = F("{\"error\": \"Failed to serialize other\"}");
     }
@@ -3490,7 +3499,9 @@ void handleHealth()
 #ifdef ESP8266
     const uint32_t freeHeap = ESP.getFreeHeap();
     const uint32_t maxBlock = ESP.getMaxFreeBlockSize();
-    StaticJsonDocument<768> doc;
+    // This is a high-water mark of stack use, not the current stack pointer.
+    const uint32_t freeContinuationStack = ESP.getFreeContStack();
+    DynamicJsonDocument doc(1024);
     doc[F("ok")] = freeHeap >= 6000 && maxBlock >= 4096;
     doc[F("firmware")] = FW_VERSION;
     doc[F("uptimeSeconds")] = millis() / 1000UL;
@@ -3499,7 +3510,7 @@ void handleHealth()
     doc[F("minimumHeap")] = heap_water_mark;
     doc[F("largestHeapBlock")] = maxBlock;
     doc[F("heapFragmentationPercent")] = ESP.getHeapFragmentation();
-    doc[F("freeContinuationStack")] = ESP.getFreeContStack();
+    doc[F("freeContinuationStack")] = freeContinuationStack;
     doc[F("wifiConnected")] = WiFi.status() == WL_CONNECTED;
     doc[F("wifiRssi")] = WiFi.status() == WL_CONNECTED ? WiFi.RSSI() : 0;
     doc[F("wifiGotIpCount")] = wifiGotIpCount;
@@ -3509,6 +3520,25 @@ void handleHealth()
     doc[F("suplaRunning")] = suplaBridge && suplaBridge->isRunning();
     doc[F("suplaStatus")] = suplaBridge ? suplaBridge->status() : "stopped";
     doc[F("resetReason")] = ESP.getResetReason();
+    const auto& crash = CrashDiagnostics::lastCrash();
+    char address[11];
+    if(crash.reason == 0)
+        doc[F("lastCrash")] = nullptr;
+    else
+    {
+        auto summary = doc.createNestedObject(F("lastCrash"));
+        summary[F("reason")] = CrashDiagnostics::reasonName(crash.reason);
+        summary[F("reasonCode")] = crash.reason;
+        summary[F("source")] = CrashDiagnostics::sourceName(crash.source);
+        if(crash.reason == REASON_EXCEPTION_RST)
+            summary[F("exceptionCause")] = crash.exceptionCause;
+        if(crash.programCounter != 0)
+        {
+            snprintf_P(address, sizeof(address), PSTR("0x%08lx"),
+                       static_cast<unsigned long>(crash.programCounter));
+            summary[F("programCounter")] = address;
+        }
+    }
     doc[F("model")] = bwc ? bwc->getModel() : "unknown";
     if(bwc && bwc->cio && bwc->dsp)
     {
@@ -3520,8 +3550,8 @@ void handleHealth()
     }
 
     String json;
-    json.reserve(640);
-    if(serializeJson(doc, json) == 0)
+    const size_t size = measureJson(doc);
+    if(doc.overflowed() || !json.reserve(size) || serializeJson(doc, json) != size)
     {
         server->send(500, F("application/json"), F("{\"ok\":false,\"error\":\"serialization\"}"));
         return;
@@ -3537,8 +3567,13 @@ void handleESPInfo()
 #ifdef ESP8266
     char stack;
     uint32_t stacksize = stack_start - &stack;
-    size_t const BUFSIZE = 1024;
-    char response[BUFSIZE];
+    constexpr size_t BUFSIZE = 384;
+    std::unique_ptr<char[]> response(new (std::nothrow) char[BUFSIZE]);
+    if(!response)
+    {
+        server->send(503, F("text/plain"), F("Not enough memory for diagnostics."));
+        return;
+    }
 
     char const *response_dram =
         PSTR(
@@ -3561,12 +3596,12 @@ void handleESPInfo()
     server->setContentLength(CONTENT_LENGTH_UNKNOWN);
     server->send(200, F("text/plain"), "");
 
-    snprintf_P(response, BUFSIZE, response_dram,
+    snprintf_P(response.get(), BUFSIZE, response_dram,
                stacksize,
                ESP.getFreeHeap(),
                heap_water_mark,
                ESP.getMaxFreeBlockSize());
-    server->sendContent(response);
+    server->sendContent(response.get());
     uint32_t iram_heap;
     uint32_t iram_maxblock;
     {
@@ -3574,7 +3609,7 @@ void handleESPInfo()
         iram_heap = ESP.getFreeHeap();
         iram_maxblock = ESP.getMaxFreeBlockSize();
     }
-    snprintf_P(response, BUFSIZE, response_iram,
+    snprintf_P(response.get(), BUFSIZE, response_iram,
                iram_heap,
                iram_maxblock,
                ESP.getCoreVersion().c_str(),
@@ -3584,7 +3619,7 @@ void handleESPInfo()
                ESP.getSketchSize(),
                ESP.getFreeSketchSpace());
 
-    server->sendContent(response);
+    server->sendContent(response.get());
     server->sendContent("");
 
 #endif
@@ -3609,89 +3644,6 @@ void setTemperatureFromSensor()
         }
     }
     BWC_YIELD;
-}
-
-extern "C" void custom_crash_callback(struct rst_info *rst_info, uint32_t stack, uint32_t stack_end)
-{
-    File file = LittleFS.open(F("crashlog.txt"), "a");
-    String crashinfo;
-    crashinfo.reserve(1024);
-    char tempstring[64];
-    time_t t = time(NULL);
-    crashinfo = F("Crashed time: ");
-    crashinfo += asctime(gmtime(&t));
-    // write crash time to buffer
-    uint32_t crashTime = millis();
-    crashinfo += F("\nMillis:");
-    crashinfo += crashTime;
-    crashinfo += '\n';
-
-    // write reset info to buffer
-    // REASON_DEFAULT_RST      = 0,    /* normal startup by power on */
-    // REASON_WDT_RST          = 1,    /* hardware watch dog reset */
-    // REASON_EXCEPTION_RST    = 2,    /* exception reset, GPIO status won’t change */
-    // REASON_SOFT_WDT_RST     = 3,    /* software watch dog reset, GPIO status won’t change */
-    // REASON_SOFT_RESTART     = 4,    /* software restart ,system_restart , GPIO status won’t change */
-    // REASON_DEEP_SLEEP_AWAKE = 5,    /* wake up from deep-sleep */
-    // REASON_EXT_SYS_RST      = 6     /* external system reset */
-    String reasons[7] = {
-        "REASON_DEFAULT_RST",
-        "REASON_WDT_RST",
-        "REASON_EXCEPTION_RST",
-        "REASON_SOFT_WDT_RST",
-        "REASON_SOFT_RESTART",
-        "REASON_DEEP_SLEEP_AWAKE",
-        "REASON_EXT_SYS_RST"};
-
-    snprintf(tempstring, 64, "%d (%s)\n", rst_info->reason, reasons[rst_info->reason].c_str());
-    crashinfo += F("Reason: ");
-    crashinfo += tempstring;
-
-    crashinfo += F("Cause:  ");
-    crashinfo += rst_info->exccause;
-    crashinfo += F(" (0=cmd invalid, 6=div by zero, 9=unaligned r/w, 28/29=access to invalid addr)\n");
-
-    crashinfo += F("epc1: ");
-    snprintf(tempstring, 16, "%08x\n", rst_info->epc1);
-    crashinfo += tempstring;
-
-    crashinfo += F("epc2: ");
-    snprintf(tempstring, 16, "%08x\n", rst_info->epc2);
-    crashinfo += tempstring;
-
-    crashinfo += F("epc3: ");
-    snprintf(tempstring, 16, "%08x\n", rst_info->epc3);
-    crashinfo += tempstring;
-
-    crashinfo += F("excvaddr: ");
-    snprintf(tempstring, 16, "%08x\n", rst_info->excvaddr);
-    crashinfo += tempstring;
-
-    crashinfo += F("depc: ");
-    snprintf(tempstring, 16, "%08x\n", rst_info->depc);
-    crashinfo += tempstring;
-
-    crashinfo += F("\nstack>>>>>>>>>>>>>");
-
-    for (uint32_t iAddress = stack; iAddress < stack_end; iAddress += sizeof(uint32_t *))
-    {
-        char buf[16];
-        snprintf(buf, 16, "\n%08x: ", iAddress);
-        crashinfo += buf;
-        for (uint32_t i = 0; i < 4; i++)
-        {
-            uint32_t *pValue = (uint32_t *)iAddress;
-            snprintf(buf, 16, "%08x ", *pValue);
-            crashinfo += buf;
-            crashinfo += ' ';
-        }
-    }
-
-    crashinfo += F("\n<<<<<<<<<<<<<stack\n\n\n");
-    file.print(crashinfo);
-    file.close();
-    delay(3000);
-    // ESP.restart();
 }
 
 #include "ha.hpp"

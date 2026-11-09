@@ -146,5 +146,11 @@ http://layzspa.local/health/
 ```
 
 Odpowiedź zawiera między innymi wersję firmware, czas działania, pamięć,
-parametry Wi-Fi, status SUPLA, przyczynę ostatniego restartu i liczniki ramek
-CIO/DSP.
+parametry Wi-Fi, status SUPLA, przyczynę bieżącego startu (`resetReason`) i
+liczniki ramek CIO/DSP. `freeContinuationStack` to najmniejszy zapas stosu
+od startu, a nie chwilowa ilość wolnej pamięci.
+
+Pole `lastCrash` zawiera skrót ostatniej wykrytej awarii, jeżeli jest dostępny:
+przyczynę, kod wyjątku oraz adres instrukcji, jeśli udało się go ustalić.
+Planowana aktualizacja nie nadpisuje tej informacji zwykłym restartem.
+Surowy zrzut pamięci nie jest dostępny przez HTTP.
